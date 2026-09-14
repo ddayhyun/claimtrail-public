@@ -1,0 +1,136 @@
+name: Release
+
+# 수동 실행(workflow_dispatch)은 TestPyPI, v* 태그 푸시는 PyPI.
+# 진짜 배포는 되돌릴 수 없다(같은 버전 재업로드 불가, 삭제해도 이름 영구 소진).
+# 그래서 올리기 전에 같은 커밋에서 CI 3잡(Linux 3.9·3.12, Windows 3.12)을
+# 다시 돌리고, 그 커밋이 main 에 포함돼 있을 때만 올린다.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: main 조상·버전 검사
+    runs-on: ubuntu-latest
+    steps:
+      # 기본 checkout 은 커밋 하나만 받는다. 조상 검사에는 이력이 필요하다.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # fetch-depth: 0 만 믿지 않는다. main 을 이름으로 명시해 받는다.
+      - name: origin/main 을 명시적으로 받는다
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: 이 커밋이 main 에 포함돼 있는지
+        run: |
+          CANDIDATE=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          if git merge-base --is-ancestor "$CANDIDATE" origin/main; then
+            echo "main 조상 확인: $CANDIDATE"
+          else
+            echo "::error::$CANDIDATE 는 main 에 포함되지 않았다. 올리지 않는다."
+            exit 1
+          fi
+
+      - name: 수동 실행은 main 에서만
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::workflow_dispatch 는 main 에서만 허용한다: $GITHUB_REF"
+            exit 1
+          fi
+
+      - name: 태그·pyproject·패키지 버전이 모두 같은지
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os, re, sys, tomllib
+          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/v")
+          with open("pyproject.toml", "rb") as fh:
+              pkg = tomllib.load(fh)["project"]["version"]
+          src = open("src/claimtrail/__init__.py", encoding="utf-8").read()
+          mod = re.search(r'__version__\s*=\s*"([^"]+)"', src).group(1)
+          print(f"태그: {tag} / pyproject: {pkg} / __version__: {mod}")
+          if not (tag == pkg == mod):
+              print("::error::세 버전이 다르다. 업로드하지 않는다.")
+              sys.exit(1)
+          PY
+
+  # 같은 저장소의 상대 경로 호출은 caller 와 같은 커밋의 워크플로를 쓴다.
+  ci:
+    name: CI 재실행
+    needs: gate
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: 빌드와 검증
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: 빌드 도구 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: 빌드
+        run: python -m build
+
+      - name: 배포물 검증
+        run: twine check dist/*
+
+      - name: 산출물 목록을 요약에 남긴다
+        run: |
+          {
+            echo "## 배포 후보"
+            echo
+            ls -lh dist/ | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: 업로드
+    needs: build
+    runs-on: ubuntu-latest
+    # 이 환경에 필수 검토자를 걸어두면 업로드 직전에 수동 승인 단계가 생긴다.
+    # 되돌릴 수 없는 작업이므로 설정을 권장한다.
+    environment: release
+    permissions:
+      id-token: write # Trusted Publishing(OIDC). API 토큰을 저장하지 않는다.
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      # skip-existing 을 켜지 않는다. 같은 버전이 이미 있으면 새 산출물은
+      # 올라가지 않는데 성공처럼 보인다. 재시험은 버전을 올린 뒤 한다.
+      - name: TestPyPI 업로드 (수동 실행)
+        if: github.event_name == 'workflow_dispatch'
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          print-hash: true
+
+      - name: PyPI 업로드 (v* 태그)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          print-hash: true

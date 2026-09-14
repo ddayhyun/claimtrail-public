@@ -1,0 +1,94 @@
+# 공개 샘플 확인: docs/getting-started.md 의 명령 흐름을 새 가상환경에서 그대로 실행한다.
+#
+# - Ubuntu 는 Bash, Windows 는 PowerShell -- 안내 문서의 두 셸 예제를 각각 검증한다.
+# - Claimtrail 은 이 체크아웃에서 `pip install .` 로 설치한다. 안내 문서의 `pip install git+…@태그`
+#   경로(인증 없는 설치)는 이 워크플로가 확인하지 않는다 -- 공개 뒤 별도로 확인한다.
+# - 샘플의 의도된 실패(형식 검사 1파일)만 허용한다: 종료 코드 1 과 실패 항목을
+#   examples/check_sample_report.py 로 대조하고, 그 외 실패는 이 워크플로의 실패다.
+# - 기존 ci.yml / release.yml 은 건드리지 않는다.
+name: Sample
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sample:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # ---- Ubuntu / Bash: docs/getting-started.md 의 Bash 절과 같은 순서 ----
+      - name: 새 가상환경에서 설치·샘플 실행 (Bash)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -u
+          python -m venv "$RUNNER_TEMP/ct-venv"
+          PY="$RUNNER_TEMP/ct-venv/bin/python"
+          "$PY" -m pip install --upgrade pip
+          "$PY" -m pip install .            # 이 체크아웃에서 설치
+          "$PY" -m pip install pytest ruff  # 샘플이 쓰는 검사 도구. Claimtrail 설치가 대신 준비하지 않는다
+          "$PY" -m claimtrail --version
+          mkdir -p "$RUNNER_TEMP/out"
+          # 검사 대상 / 설정 / 리포트는 서로 다른 곳. 설정과 리포트는 대상 밖.
+          # Actions 의 bash 는 -e 가 켜져 있어 종료 코드 1 에서 단계가 바로 죽는다(1차 실행에서
+          # 실제로 그랬다). 판정 코드를 읽으려면 그 명령만 -e 밖에 둔다.
+          set +e
+          "$PY" -m claimtrail run examples/sample-project \
+            --config examples/claimtrail.json --format md -o "$RUNNER_TEMP/out/report.md"
+          rc=$?                              # 바로 다음 줄에서 읽는다
+          "$PY" -m claimtrail run examples/sample-project \
+            --config examples/claimtrail.json --format json -o "$RUNNER_TEMP/out/report.json"
+          rc_json=$?
+          set -e
+          echo "exit(md)=$rc exit(json)=$rc_json"
+          echo "$rc" > "$RUNNER_TEMP/out/exit_code.txt"
+          "$PY" examples/check_sample_report.py "$RUNNER_TEMP/out/report.json" "$rc"
+          test "$rc" -eq "$rc_json"
+          { echo "## 샘플 리포트 (Ubuntu / Python 3.12) — claimtrail 종료 코드 $rc"; echo; cat "$RUNNER_TEMP/out/report.md"; } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Windows / PowerShell: docs/getting-started.md 의 PowerShell 절과 같은 순서 ----
+      - name: 새 가상환경에서 설치·샘플 실행 (PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m venv "$env:RUNNER_TEMP\ct-venv"
+          $py = "$env:RUNNER_TEMP\ct-venv\Scripts\python.exe"
+          & $py -m pip install --upgrade pip
+          & $py -m pip install .              # 이 체크아웃에서 설치
+          & $py -m pip install pytest ruff
+          & $py -m claimtrail --version
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\out" | Out-Null
+          & $py -m claimtrail run examples/sample-project --config examples/claimtrail.json --format md -o "$env:RUNNER_TEMP\out\report.md"
+          $rc = $LASTEXITCODE                 # 바로 다음 줄에서 읽는다
+          & $py -m claimtrail run examples/sample-project --config examples/claimtrail.json --format json -o "$env:RUNNER_TEMP\out\report.json"
+          $rcJson = $LASTEXITCODE
+          "exit(md)=$rc exit(json)=$rcJson"
+          Set-Content -Path "$env:RUNNER_TEMP\out\exit_code.txt" -Value $rc
+          & $py examples/check_sample_report.py "$env:RUNNER_TEMP\out\report.json" $rc
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($rc -ne $rcJson) { "md 와 json 실행의 종료 코드가 다르다"; exit 1 }
+          "## 샘플 리포트 (Windows / Python 3.12) — claimtrail 종료 코드 $rc`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP\out\report.md" -Encoding utf8 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: 샘플 리포트 아티팩트
+        uses: actions/upload-artifact@v7
+        with:
+          name: sample-report-${{ matrix.os }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error

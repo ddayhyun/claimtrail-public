@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claimtrail"
+version = "0.5.1"
+description = "AI 에이전트가 \"완료했습니다\"라고 말할 때, 그 주장을 실제로 검사하고 증빙을 남긴다."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+authors = [{ name = "ddayhyun" }]
+keywords = ["verification", "evidence", "audit", "testing", "ci", "pytest", "lint", "ai-agent"]
+
+# License 분류자는 넣지 않는다. PEP 639 의 License-Expression 을 쓰면
+# License :: OSI Approved :: 분류자와 중복이라 PyPI 가 거부한다.
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddayhyun/claimtrail-public"
+Repository = "https://github.com/ddayhyun/claimtrail-public"
+Issues = "https://github.com/ddayhyun/claimtrail-public/issues"
+
+[project.scripts]
+claimtrail = "claimtrail.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claimtrail"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+# examples/ 는 공개 샘플이다. 샘플의 calc.py 는 일부러 형식이 어긋나 있고 샘플 자체의
+# pyproject 로 검사된다. 이 저장소의 lint·형식 검사 범위에서는 뺀다.
+extend-exclude = ["examples"]
+
+[tool.ruff.lint]
+# UP(pyupgrade)은 target-version = py39 기준으로만 적용된다.
+# list[str] 같은 PEP 585 제네릭은 3.9 네이티브라 그대로 안전하고,
+# X | None (PEP 604)은 런타임에 3.10+ 가 필요하지만 대상 모듈이 모두
+# from __future__ import annotations 를 갖고 있어 애노테이션이 평가되지
+# 않는다. 런타임에 타입을 평가하는 코드(cast/get_type_hints)는 없다.
+select = ["E", "F", "W", "I", "B", "SIM", "C4", "UP"]
+
+[tool.mypy]
+# examples/ 는 공개 샘플. 이 저장소의 type-check 범위에서 뺀다(자기 검증이 `mypy .` 을 돌린다).
+exclude = ["^examples/"]
+# python_version 을 고정하지 않는다. 이 프로젝트는 3.9 이상을 지원하는데
+# 최신 mypy 는 3.9 를 타깃으로 지정하는 것 자체를 거부한다(3.10 이상만 허용).
+# 지정하지 않으면 각 mypy 가 자기 실행 파이썬을 타깃으로 삼아, CI 의
+# 3.9 잡과 3.12 잡이 각각 해당 버전 기준으로 검사한다.
+
+[[tool.mypy.overrides]]
+# tomllib 은 3.11+ 표준 라이브러리다. 3.9/3.10 을 대상으로 분석하면
+# 찾지 못하는데, detect.py 는 그 경우를 try/except 로 이미 처리하고 있다.
+module = ["tomllib"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

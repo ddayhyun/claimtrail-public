@@ -1,0 +1,193 @@
+{
+  "tool": "claimtrail",
+  "version": "0.5.1",
+  "target": "/home/runner/work/claimtrail/claimtrail/examples/sample-project",
+  "ran_at": "2026-09-10T07:43:08+00:00",
+  "verdict": "fail",
+  "scope": {
+    "source": "/home/runner/work/claimtrail/claimtrail/examples/claimtrail.json",
+    "required": [
+      "pytest",
+      "lint",
+      "format"
+    ],
+    "required_status": {
+      "pytest": "pass",
+      "lint": "pass",
+      "format": "fail"
+    },
+    "pytest_paths": [
+      "tests"
+    ],
+    "format_tool": "ruff"
+  },
+  "environment": {
+    "python_executable": "/home/runner/work/_temp/ct-venv/bin/python",
+    "python_version": "3.12.14",
+    "claimtrail_source": "/home/runner/work/_temp/ct-venv/lib/python3.12/site-packages/claimtrail",
+    "tools": {
+      "pytest": "9.1.1",
+      "ruff": "0.16.6",
+      "flake8": "미설치",
+      "mypy": "확인하지 않음",
+      "build": "확인하지 않음"
+    }
+  },
+  "detections": [
+    {
+      "kind": "pytest",
+      "found": true,
+      "signals": [
+        "pyproject.toml: [tool.pytest.ini_options]",
+        "tests/ 아래 test_*.py 또는 *_test.py 1개"
+      ],
+      "reason": ""
+    },
+    {
+      "kind": "lint",
+      "found": true,
+      "signals": [
+        "pyproject.toml: [tool.ruff]"
+      ],
+      "reason": ""
+    },
+    {
+      "kind": "type-check",
+      "found": false,
+      "signals": [],
+      "reason": "pyproject.toml/mypy.ini/setup.cfg/pyrightconfig.json 어디에도 mypy 또는 pyright 설정이 없음"
+    },
+    {
+      "kind": "build",
+      "found": false,
+      "signals": [],
+      "reason": "pyproject.toml에 [build-system]이 없고 setup.py도 없어 빌드할 패키지로 볼 근거가 없음"
+    },
+    {
+      "kind": "npm test",
+      "found": false,
+      "signals": [],
+      "reason": "package.json이 없어 Node 프로젝트로 볼 근거가 없음"
+    },
+    {
+      "kind": "format",
+      "found": true,
+      "signals": [
+        "claimtrail.json: format.tool = ruff",
+        "pyproject.toml: [tool.ruff]"
+      ],
+      "reason": ""
+    }
+  ],
+  "results": [
+    {
+      "kind": "pytest",
+      "status": "pass",
+      "command": [
+        "/home/runner/work/_temp/ct-venv/bin/python",
+        "-m",
+        "pytest",
+        "--junit-xml",
+        "/tmp/tmphixrop4t/junit.xml",
+        "-q",
+        "tests"
+      ],
+      "exit_code": 0,
+      "total": 5,
+      "passed": 5,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "duration_sec": 0.02,
+      "wall_sec": 0.28,
+      "failures": [],
+      "summary": "",
+      "note": "",
+      "cwd": "/home/runner/work/claimtrail/claimtrail/examples/sample-project",
+      "reason_code": "",
+      "phase": "run",
+      "tests_ran": 5
+    },
+    {
+      "kind": "lint",
+      "status": "pass",
+      "command": [
+        "/home/runner/work/_temp/ct-venv/bin/python",
+        "-m",
+        "ruff",
+        "check",
+        "--output-format=json",
+        "."
+      ],
+      "exit_code": 0,
+      "total": null,
+      "passed": null,
+      "failed": 0,
+      "errors": null,
+      "skipped": null,
+      "duration_sec": 0.03,
+      "wall_sec": 0.03,
+      "failures": [],
+      "summary": "위반 없음",
+      "note": "",
+      "cwd": "",
+      "reason_code": "",
+      "phase": "",
+      "tests_ran": null
+    },
+    {
+      "kind": "format",
+      "status": "fail",
+      "command": [
+        "/home/runner/work/_temp/ct-venv/bin/python",
+        "-m",
+        "ruff",
+        "format",
+        "--check",
+        "."
+      ],
+      "exit_code": 1,
+      "total": null,
+      "passed": null,
+      "failed": 1,
+      "errors": null,
+      "skipped": null,
+      "duration_sec": 0.03,
+      "wall_sec": 0.03,
+      "failures": [
+        {
+          "test": "sample_calc/calc.py",
+          "message": "ruff format 결과와 다르다"
+        }
+      ],
+      "summary": "형식 차이 1개 파일",
+      "note": "",
+      "cwd": "/home/runner/work/claimtrail/claimtrail/examples/sample-project",
+      "reason_code": "",
+      "phase": "",
+      "tests_ran": null
+    }
+  ],
+  "not_verified": [
+    "type-check",
+    "build",
+    "npm test"
+  ],
+  "not_verified_detail": [
+    {
+      "kind": "type-check",
+      "reason_code": "not_detected",
+      "detail": "pyproject.toml/mypy.ini/setup.cfg/pyrightconfig.json 어디에도 mypy 또는 pyright 설정이 없음"
+    },
+    {
+      "kind": "build",
+      "reason_code": "not_detected",
+      "detail": "pyproject.toml에 [build-system]이 없고 setup.py도 없어 빌드할 패키지로 볼 근거가 없음"
+    },
+    {
+      "kind": "npm test",
+      "reason_code": "not_detected",
+      "detail": "package.json이 없어 Node 프로젝트로 볼 근거가 없음"
+    }
+  ]
+}

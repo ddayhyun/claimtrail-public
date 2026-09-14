@@ -1,0 +1,5 @@
+{
+  "required": ["pytest", "lint", "format"],
+  "pytest": { "paths": ["tests"] },
+  "format": { "tool": "ruff" }
+}

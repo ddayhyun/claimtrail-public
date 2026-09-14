@@ -1,0 +1,18 @@
+[project]
+name = "sample-calc"
+version = "0.1.0"
+description = "Claimtrail 공개 샘플. 외부 의존성 없음. 테스트는 통과하고 형식 검사는 의도적으로 실패한다."
+requires-python = ">=3.9"
+
+# Claimtrail 이 이 프로젝트에서 탐지하는 근거:
+# - pytest: [tool.pytest.ini_options] 와 tests/test_*.py
+# - lint:   [tool.ruff]
+# - format: claimtrail.json 의 format.tool = ruff (자동 탐지되지 않는다 -- 설정으로 켠다)
+# - type-check·build·npm test: 설정이 없어 '확인하지 못한 것' 으로 남는다. 이것이 의도다.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
