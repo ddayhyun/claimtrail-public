@@ -152,4 +152,4 @@ CI 스크립트처럼 `set -e` 가 켜진 셸(GitHub Actions 의 `shell: bash` �
 
 막힌 곳, 이해되지 않은 결과, 다시 쓸 이유가 있었는지를 알려 주십시오. 세 가지만 물어봅니다:
 어떤 작업에서 썼는지, 어디서 막혔는지, 다음 작업에서 다시 썼는지(아니라면 이유).
-피드백 경로는 공개 시점에 확정합니다(저장소 접근 권한이 없어도 남길 수 있는 곳으로).
+GitHub Issues 에 남겨 주십시오: https://github.com/ddayhyun/claimtrail-public/issues (GitHub 계정만 있으면 됩니다).

@@ -111,8 +111,12 @@
   .start .cols p{margin:12px 0 0;color:var(--muted);font-size:16px}
   .install{margin-top:40px;background:var(--dark);color:var(--inverse);border-radius:12px;padding:22px 28px;display:grid;grid-template-columns:1fr auto;gap:16px;align-items:start}
   .install .k{font-size:12px;font-weight:500}
-  .install .cmd{font-family:var(--mono);font-size:20px;margin:10px 0}
+  .install .cmd{font-family:var(--mono);font-size:15px;margin:10px 0;white-space:pre-wrap;word-break:break-all;line-height:1.5}
   .install .d{font-size:13px;color:var(--dim)}
+  .install .d a{color:var(--inverse)}
+  a.pill{text-decoration:none}
+  a.pill:hover{color:var(--accent)}
+  .feedback .btn{background:var(--soft);color:var(--ink);margin-top:28px}
   .install .badge{font-size:12px;font-weight:500;background:rgba(255,255,255,.12);padding:6px 12px;border-radius:999px;white-space:nowrap}
   .codes{display:grid;grid-template-columns:repeat(3,1fr);gap:32px;margin-top:36px}
   .codes .c{display:flex;align-items:baseline;gap:14px}
@@ -200,7 +204,7 @@
       <a href="#report">리포트</a>
       <a href="#start">시작하기</a>
       <a href="#scope">지원 범위</a>
-      <span class="pill">공개 준비 중</span>
+      <a class="pill" href="https://github.com/ddayhyun/claimtrail-public">GitHub</a>
     </nav>
   </div>
 </header>
@@ -251,7 +255,7 @@
         <h2>결과와 빈틈을, 한눈에.</h2>
         <p class="lead">긴 로그를 펼치기 전에, 전체 판정과 검사 범위부터 확인하세요.</p>
       </div>
-      <span class="pill">샘플 다운로드 · 준비 중</span>
+      <a class="pill" href="https://github.com/ddayhyun/claimtrail-public/tree/184283b9a99ac6eab06b7ad7c541fc4d01892019/examples/sample-project">샘플 소스 보기 · GitHub</a>
     </div>
 
     <div class="grid">
@@ -295,17 +299,17 @@
 
     <div class="cols">
       <div><div class="n">01</div><h3>검사 환경 준비</h3><p>프로젝트의 가상환경과 의존성,<br>pytest·Ruff 등 검증기를 준비합니다.</p></div>
-      <div><div class="n">02</div><h3>도구와 샘플 받기</h3><p>설치 경로와 샘플 소스를 함께 안내합니다.<br>현재는 외부 설치 주소를 준비 중입니다.</p></div>
+      <div><div class="n">02</div><h3>도구와 샘플 받기</h3><p>설치 경로와 샘플 소스를 함께 안내합니다.<br>소스는 확인한 커밋(태그 <span class="mono">public-2026-09-14</span>)으로 받습니다.</p></div>
       <div><div class="n">03</div><h3>실행하고 결과 읽기</h3><p>설정·리포트는 검사 대상 밖에 둡니다.<br>실행 직후 종료 코드를 저장합니다.</p></div>
     </div>
 
-    <div class="install" aria-label="설치 명령 자리표시자">
+    <div class="install" aria-label="설치 명령">
       <div>
-        <div class="k">설치 명령 · 준비 중</div>
-        <div class="cmd">&lt;INSTALL_COMMAND&gt;</div>
-        <div class="d">설치 주소 검증 후 실제 명령과 샘플 경로를 제공합니다. 지금은 실행 가능한 명령이 아닙니다.</div>
+        <div class="k">설치 명령 · 확인한 커밋으로 고정</div>
+        <div class="cmd">pip install "git+https://github.com/ddayhyun/claimtrail-public.git@184283b9a99ac6eab06b7ad7c541fc4d01892019"</div>
+        <div class="d">이 커밋은 CI(Ubuntu Python 3.9·3.12, Windows 3.12)를 통과했습니다. pytest·Ruff 같은 검사 도구는 같은 가상환경에 따로 설치합니다. 새 가상환경에서 샘플까지 돌려 보는 절차는 <a href="https://github.com/ddayhyun/claimtrail-public/blob/184283b9a99ac6eab06b7ad7c541fc4d01892019/docs/getting-started.md">시작 안내</a>에 있습니다.</div>
       </div>
-      <span class="badge">설치 주소 미확정</span>
+      <span class="badge">CI 통과 커밋 184283b</span>
     </div>
 
     <div class="codes" aria-label="종료 코드">
@@ -350,8 +354,8 @@
         <p class="eyebrow sans">Feedback</p>
         <h2>써본 경험을 들려주세요.</h2>
         <p class="lead">어디서 막혔는지, 다시 쓸 이유가 있었는지<br>궁금합니다.</p>
-        <span class="btn disabled" aria-disabled="true">피드백 남기기 · 준비 중</span>
-        <p class="fine">피드백 채널은 주소 확정 후 연결됩니다.</p>
+        <a class="btn" href="https://github.com/ddayhyun/claimtrail-public/issues">피드백 남기기 · GitHub Issues</a>
+        <p class="fine">GitHub 계정으로 이슈를 남길 수 있습니다. 세 가지 질문에만 답해 주셔도 충분합니다.</p>
       </div>
       <ol class="qs">
         <li><span class="n">01</span><div class="q">어떤 프로젝트나 작업에서 사용했나요?</div></li>
