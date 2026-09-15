@@ -54,11 +54,15 @@ _KEY_VALUE = re.compile(
 # `Authorization: Bearer …` 형태. 헤더 접두는 선택이다 -- pytest 가 값만 보여 주는 경우가
 # 있어서다. 대신 헤더가 없을 때는 값이 자격증명처럼 보일 때만 가린다(아래 _looks_like_credential).
 # 그렇지 않으면 "the basic idea is simple" 의 "idea" 까지 지운다.
+# 헤더 접두는 `Authorization: …` 뿐 아니라 `{"Authorization": "Bearer …"}` 같은 JSON·dict
+# 표현(따옴표로 감싼 키, 값 앞의 따옴표)도 포함한다. 헤더가 있으면 값 길이를 보지 않는다
+# (1~3자도 가림). 헤더가 없을 때만 4자 미만은 건드리지 않는다 -- "bearer of bad news".
 _BEARER = re.compile(
-    r"(?P<hdr>\bauthorization\s*[:=]\s*)?"
-    r"\b(?P<scheme>bearer|basic)\s+(?P<val>(?!\[REDACTED\])[A-Za-z0-9\-._~+/=]{4,})",
+    r"""(?P<hdr>["']?\bauthorization["']?\s*[:=]\s*["']?)?"""
+    r"""\b(?P<scheme>bearer|basic)\s+(?P<val>(?!\[REDACTED\])[A-Za-z0-9\-._~+/=]+)""",
     re.IGNORECASE,
 )
+_BARE_MIN_LEN = 4
 # 헤더 없는 `basic <값>`·`bearer <값>` 에서 값을 자격증명으로 볼 조건. 영어 단어는
 # 소문자만이거나 첫 글자만 대문자이고 숫자·기호가 없다. 그 밖(숫자, base64 기호,
 # 둘째 글자 이후의 대문자, 16자 이상)은 토큰으로 본다.
@@ -111,9 +115,10 @@ def redact(text: str) -> str:
 
     def bearer(m: re.Match[str]) -> str:
         hdr = m.group("hdr") or ""
-        if not hdr and not _looks_like_credential(m.group("val")):
+        val = m.group("val")
+        if not hdr and (len(val) < _BARE_MIN_LEN or not _looks_like_credential(val)):
             return m.group(0)
-        found.append(m.group("val"))
+        found.append(val)
         return f"{hdr}{m.group('scheme')} {REDACTED}"
 
     def kv(m: re.Match[str]) -> str:

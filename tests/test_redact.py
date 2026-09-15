@@ -103,6 +103,13 @@ def test_헤더_없는_일반_문장의_basic_bearer_뒤_단어는_그대로다(
         # 헤더 문맥이면 값이 짧고 평범해 보여도 가린다.
         "Authorization: Basic abcd",
         "authorization = bearer wxyz",
+        # 헤더 문맥은 따옴표로 감싼 JSON·dict 표현도 포함한다 (PR #2 검토에서 찾은 회귀).
+        '{"Authorization": "Bearer abcdefgh"}',
+        "headers = {'authorization': 'basic wxyz'}",
+        # 헤더가 있으면 1~3자 값도 가린다 (기존 {4,} 조건의 누락).
+        "Authorization: Bearer abc",
+        "Authorization: Basic ab",
+        '{"Authorization": "Bearer x"}',
         # 헤더가 없어도 자격증명처럼 보이면(숫자·base64 문자·대소문자 혼합·긴 길이) 가린다.
         "Basic dXNlcjpwYXNz",
         f"Basic {FAKE}",
@@ -113,8 +120,11 @@ def test_헤더_없는_일반_문장의_basic_bearer_뒤_단어는_그대로다(
 )
 def test_헤더_문맥이거나_자격증명처럼_보이면_basic_bearer_값을_가린다(text: str):
     out = redact(text)
+    value = text.split()[-1].strip("\"'}")
     assert REDACTED in out
-    assert out.split()[-1] == REDACTED
+    assert value not in out
+    # scheme 단어와 헤더·따옴표·괄호는 남는다.
+    assert out.count("[REDACTED]") == 1
 
 
 def test_키_뒤_한_단어만_가리고_문장의_나머지는_남는다():
