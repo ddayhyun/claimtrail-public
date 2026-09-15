@@ -139,7 +139,7 @@ Stop 훅의 증빙 파일까지 같은 함수를 거칩니다. 훅의 판정·�
 | 형태 | 예 |
 |---|---|
 | 키=값 · 키: 값 · `"키": "값"` (키 이름 대소문자·따옴표 무시) | `api_key`, `apikey`, `access_token`, `auth_token`, `refresh_token`, `id_token`, `token`, `secret`, `secret_key`, `client_secret`, `password`, `passwd`, `pwd` |
-| Authorization 헤더 | `Bearer …`, `Basic …` |
+| Authorization 헤더 | `Authorization: Bearer …`, `Authorization: Basic …` — 헤더가 있으면 값이 무엇이든 가림. 헤더 없이 `Bearer <값>`·`Basic <값>` 만 있으면 값이 16자 이상이거나 숫자·`-._~+/=`·둘째 글자 이후 대문자를 포함할 때만 가림 |
 | URL 사용자 정보의 비밀번호 | `scheme://user:비밀번호@host` |
 | 접두가 뚜렷한 토큰 형식 (이름 없이 값만 있어도) | `sk-…`(16자 이상), GitHub `ghp_…`·`github_pat_…`, AWS `AKIA…`, Slack `xoxb-…`, Google `AIza…`, JWT `eyJ….eyJ….…` |
 
@@ -150,7 +150,10 @@ Stop 훅의 증빙 파일까지 같은 함수를 거칩니다. 훅의 판정·�
 잡힌 값이 **6자 이상**이고 같은 텍스트의 다른 자리에 이름 없이 다시 나오면 그것도
 가립니다(pytest 는 `assert 'sk-…' == 'expected'  where token=sk-…` 처럼 값을 먼저 보여
 줍니다). 짧은 값은 전파하지 않아 무관한 단어를 훼손하지 않습니다. 가림은 축약보다 먼저
-하므로 잘린 조각에 값 일부가 남지 않습니다.
+하므로 잘린 조각에 값 일부가 남지 않습니다. 헤더 없는 `basic`·`bearer` 뒤의 평범한 단어는
+그대로 둡니다(`the basic idea is simple` 은 바뀌지 않습니다). 대가로 헤더 없이 나오는
+알파벳만으로 된 16자 미만 토큰은 가려지지 않을 수 있습니다 — 문맥 없이는 단어와 구분할 수
+없기 때문입니다.
 
 한계를 그대로 적습니다. 이것은 **위 형태의 값**만 알아봅니다. 이름 없는 긴 난수, 개인정보,
 사설 경로, 다른 이름의 키는 그대로 실립니다. 환경변수나 `.env` 를 읽어 치환하지 않습니다(그

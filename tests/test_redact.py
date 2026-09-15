@@ -80,6 +80,53 @@ def test_일반_문장과_평범한_단어는_그대로다(text: str):
     assert redact(text) == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # basic/bearer 뒤에 평범한 단어가 오는 일반 문장. 헤더 문맥이 없고 값이
+        # 자격증명처럼 보이지 않으면 건드리지 않는다. (블라인드 실험 trial_01 이 찾은
+        # 과잉 가림 -- "the basic idea is simple" 이 "the basic [REDACTED] is simple" 이 됐다.)
+        "the basic idea is simple",
+        "Basic usage failed",
+        "bearer of bad news",
+        "Usage: basic auth required",
+        "basic HTTP request",
+    ],
+)
+def test_헤더_없는_일반_문장의_basic_bearer_뒤_단어는_그대로다(text: str):
+    assert redact(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 헤더 문맥이면 값이 짧고 평범해 보여도 가린다.
+        "Authorization: Basic abcd",
+        "authorization = bearer wxyz",
+        # 헤더 문맥은 따옴표로 감싼 JSON·dict 표현도 포함한다 (PR #2 검토에서 찾은 회귀).
+        '{"Authorization": "Bearer abcdefgh"}',
+        "headers = {'authorization': 'basic wxyz'}",
+        # 헤더가 있으면 1~3자 값도 가린다 (기존 {4,} 조건의 누락).
+        "Authorization: Bearer abc",
+        "Authorization: Basic ab",
+        '{"Authorization": "Bearer x"}',
+        # 헤더가 없어도 자격증명처럼 보이면(숫자·base64 문자·대소문자 혼합·긴 길이) 가린다.
+        "Basic dXNlcjpwYXNz",
+        f"Basic {FAKE}",
+        "bearer eyJhbGciOiJIUzI1NiJ9",
+        "Bearer abcdefghijklmnopqrstuvwxyz",
+        "Basic a1b2",
+    ],
+)
+def test_헤더_문맥이거나_자격증명처럼_보이면_basic_bearer_값을_가린다(text: str):
+    out = redact(text)
+    value = text.split()[-1].strip("\"'}")
+    assert REDACTED in out
+    assert value not in out
+    # scheme 단어와 헤더·따옴표·괄호는 남는다.
+    assert out.count("[REDACTED]") == 1
+
+
 def test_키_뒤_한_단어만_가리고_문장의_나머지는_남는다():
     # 명확한 키 뒤의 값은 조건 없이 가린다. 일반 문장이면 키 바로 뒤 한 단어가 대가다.
     assert redact("password: must be at least 8 characters") == (

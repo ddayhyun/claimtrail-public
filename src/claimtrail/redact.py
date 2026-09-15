@@ -9,7 +9,9 @@ pytest 의 오류 본문, ruff·mypy 메시지, npm 출력 끝부분은 그대�
   따옴표 유무 무시). 값의 길이·숫자 포함 여부는 보지 않는다 -- `password=abc` 도
   비밀이다. 대가로 `password: must be at least 8` 의 "must" 처럼 키 바로 뒤의 한
   단어가 지워질 수 있다. 문장의 나머지는 남는다.
-- `Authorization: Bearer …` / `Basic …` 의 토큰.
+- `Authorization: Bearer …` / `Basic …` 의 토큰. 헤더 없이 `bearer <값>`·`basic <값>` 만
+  있으면 값이 자격증명처럼 보일 때(숫자·base64 기호·둘째 글자 이후 대문자·16자 이상)만
+  가린다 -- "the basic idea is simple" 의 "idea" 는 그대로다.
 - URL 의 사용자 정보에 든 비밀번호 (`scheme://user:pw@host`).
 - 접두가 뚜렷한 잘 알려진 토큰 형식 (`sk-…`, GitHub `ghp_…`/`github_pat_…`, AWS
   `AKIA…`, Slack `xox?-…`, Google `AIza…`, JWT). 이름 없이 값만 나와도 잡는다.
@@ -49,10 +51,34 @@ _KEY_VALUE = re.compile(
     r"""(?P=q)""",
     re.IGNORECASE,
 )
+# `Authorization: Bearer …` 형태. 헤더 접두는 선택이다 -- pytest 가 값만 보여 주는 경우가
+# 있어서다. 대신 헤더가 없을 때는 값이 자격증명처럼 보일 때만 가린다(아래 _looks_like_credential).
+# 그렇지 않으면 "the basic idea is simple" 의 "idea" 까지 지운다.
+# 헤더 접두는 `Authorization: …` 뿐 아니라 `{"Authorization": "Bearer …"}` 같은 JSON·dict
+# 표현(따옴표로 감싼 키, 값 앞의 따옴표)도 포함한다. 헤더가 있으면 값 길이를 보지 않는다
+# (1~3자도 가림). 헤더가 없을 때만 4자 미만은 건드리지 않는다 -- "bearer of bad news".
 _BEARER = re.compile(
-    r"\b(?P<scheme>bearer|basic)\s+(?P<val>(?!\[REDACTED\])[A-Za-z0-9\-._~+/=]{4,})",
+    r"""(?P<hdr>["']?\bauthorization["']?\s*[:=]\s*["']?)?"""
+    r"""\b(?P<scheme>bearer|basic)\s+(?P<val>(?!\[REDACTED\])[A-Za-z0-9\-._~+/=]+)""",
     re.IGNORECASE,
 )
+_BARE_MIN_LEN = 4
+# 헤더 없는 `basic <값>`·`bearer <값>` 에서 값을 자격증명으로 볼 조건. 영어 단어는
+# 소문자만이거나 첫 글자만 대문자이고 숫자·기호가 없다. 그 밖(숫자, base64 기호,
+# 둘째 글자 이후의 대문자, 16자 이상)은 토큰으로 본다.
+_CRED_MIN_LEN = 16
+
+
+def _looks_like_credential(value: str) -> bool:
+    if len(value) >= _CRED_MIN_LEN:
+        return True
+    if any(ch.isdigit() for ch in value):
+        return True
+    if any(ch in "-._~+/=" for ch in value):
+        return True
+    return any(ch.isupper() for ch in value[1:]) and any(ch.islower() for ch in value)
+
+
 _URL_USERINFO = re.compile(
     r"(?P<head>\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:)(?P<pw>(?!\[REDACTED\])[^@\s/]+)(?P<at>@)",
     re.IGNORECASE,
@@ -88,8 +114,12 @@ def redact(text: str) -> str:
         return f"{m.group('head')}{REDACTED}{m.group('at')}"
 
     def bearer(m: re.Match[str]) -> str:
-        found.append(m.group("val"))
-        return f"{m.group('scheme')} {REDACTED}"
+        hdr = m.group("hdr") or ""
+        val = m.group("val")
+        if not hdr and (len(val) < _BARE_MIN_LEN or not _looks_like_credential(val)):
+            return m.group(0)
+        found.append(val)
+        return f"{hdr}{m.group('scheme')} {REDACTED}"
 
     def kv(m: re.Match[str]) -> str:
         # 명확한 키 뒤의 값은 길이·숫자 포함 여부와 관계없이 가린다. `password=abc` 도
