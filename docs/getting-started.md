@@ -11,7 +11,7 @@ Claimtrail 은 프로젝트에 이미 있는 검사(pytest, ruff 등)를 **실�
 | 구분 | 값 |
 |---|---|
 | 패키지 버전 | `0.5.1` (`claimtrail --version`) |
-| 확인한 소스 | 태그 `public-2026-09-14` (이 저장소의 첫 공개 커밋. 코드·샘플·이 문서가 같은 커밋에 있습니다. 실제 SHA 는 `git rev-parse public-2026-09-14`) |
+| 확인한 소스 | 태그 `public-2026-09-15` (자격증명 가림 수정 #1·#2 를 포함한 공개 커밋. 코드·샘플·이 문서가 같은 커밋에 있습니다. 실제 SHA 는 `git rev-parse public-2026-09-15`. 첫 공개 태그 `public-2026-09-14` 와 그때의 샘플 리포트는 재현 근거로 그대로 둡니다) |
 | 샘플 위치 | 같은 커밋의 `examples/`. 샘플은 패키지가 아니라 소스와 함께 받습니다 |
 | 확인한 환경 | 작성자 PC: Windows 11 / Python 3.11.9. CI: Ubuntu Bash · Windows PowerShell / Python 3.12 (`.github/workflows/sample.yml`) |
 
@@ -34,7 +34,7 @@ Claimtrail 자체는 의존성이 없습니다(표준 라이브러리만). 다�
 움직이므로 결과가 이 문서와 달라질 수 있습니다).
 
 ```bash
-git clone --branch public-2026-09-14 --depth 1 https://github.com/ddayhyun/claimtrail-public.git claimtrail-src
+git clone --branch public-2026-09-15 --depth 1 https://github.com/ddayhyun/claimtrail-public.git claimtrail-src
 git -C claimtrail-src rev-parse HEAD                     # 실제 받은 커밋을 기록해 둔다
 ```
 
@@ -49,7 +49,7 @@ git -C claimtrail-src rev-parse HEAD                     # 실제 받은 커밋�
 python3 -m venv ct-venv
 PY="$PWD/ct-venv/bin/python"                 # Git Bash(Windows): "$PWD/ct-venv/Scripts/python.exe"
 "$PY" -m pip install --upgrade pip
-"$PY" -m pip install "git+https://github.com/ddayhyun/claimtrail-public.git@public-2026-09-14"
+"$PY" -m pip install "git+https://github.com/ddayhyun/claimtrail-public.git@public-2026-09-15"
 "$PY" -m pip install pytest ruff             # 샘플이 쓰는 검사 도구
 "$PY" -m claimtrail --version                # claimtrail 0.5.1
 ```
@@ -60,7 +60,7 @@ PY="$PWD/ct-venv/bin/python"                 # Git Bash(Windows): "$PWD/ct-venv/
 python -m venv ct-venv
 $py = "$PWD\ct-venv\Scripts\python.exe"
 & $py -m pip install --upgrade pip
-& $py -m pip install "git+https://github.com/ddayhyun/claimtrail-public.git@public-2026-09-14"
+& $py -m pip install "git+https://github.com/ddayhyun/claimtrail-public.git@public-2026-09-15"
 & $py -m pip install pytest ruff
 & $py -m claimtrail --version                # claimtrail 0.5.1
 ```
