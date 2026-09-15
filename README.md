@@ -39,7 +39,7 @@ pip install .
 [docs/getting-started.md](docs/getting-started.md) 에 있습니다.
 
 ```bash
-pip install "git+https://github.com/ddayhyun/claimtrail-public.git@public-2026-09-14"
+pip install "git+https://github.com/ddayhyun/claimtrail-public.git@public-2026-09-15"
 ```
 
 개발 중이라면 편집 가능 모드로 설치합니다.
