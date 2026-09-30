@@ -298,6 +298,19 @@ def _redacted(value: object) -> object:
     return value
 
 
+def _redacted_item(item: dict) -> dict:
+    """항목 하나(사전)를 표시용으로 가린 새 사전. 원본은 바꾸지 않는다.
+
+    `_redacted` 는 값의 종류를 보존한다(사전을 넣으면 사전이 나온다). 타입 검사기는 그
+    대응을 알 수 없으므로 여기서 실제로 확인한다. 사전이 아닌 것이 나오면 가림이 깨진
+    것이다 -- 빈 사전으로 조용히 바꾸지 않고 멈춘다.
+    """
+    out = _redacted(item)
+    if not isinstance(out, dict):
+        raise TypeError(f"가린 항목이 사전이 아니다: {type(out).__name__}")
+    return out
+
+
 def _digest(doc: dict, generated: dict[str, bytes]) -> str:
     """목록 JSON 과 생성 테스트 내용을 함께 해시한다. 같은 파일 경로에 다른
     assertion 이 들어와도 다른 목록으로 본다."""
@@ -505,7 +518,7 @@ def _load_derive(
         reason = str(_redacted(str(record.get("reason") or "")))
         return DeriveStatus(NOT_APPLICABLE, reason, digest, path=str(path))
     raw_items = [dict(item, link_status=LINK_UNLINKED) for item in record.get("items") or []]
-    items = [dict(_redacted(dict(item))) for item in raw_items]  # type: ignore[arg-type]
+    items = [_redacted_item(item) for item in raw_items]
     return DeriveStatus(
         PERFORMED,
         f"항목 {len(items)}개 접수, 형식 확인",

@@ -28,7 +28,7 @@ from .derive import (
     LINK_UNLINKED,
     PERFORMED,
     DeriveStatus,
-    _redacted,
+    _redacted_item,
 )
 from .runners.base import UNVERIFIED, RunResult
 from .runners.pytest_runner import run_pytest
@@ -144,7 +144,10 @@ def link_items(
     """항목마다 {id, link_status, link_detail, nodeids} 를 돌려준다. 입력은 가림 전 원본."""
     linked: list[dict] = []
     for item in raw_items:
-        how = item.get("how") if isinstance(item.get("how"), dict) else {}
+        # 값을 변수에 담아야 타입이 좁혀진다. 사전이 아닌 how 는 확인 방법이 없는 항목으로
+        # 읽는다(아래 else 분기: 실행 안 함) -- 이 동작은 그대로다.
+        how_value = item.get("how")
+        how: dict = how_value if isinstance(how_value, dict) else {}
         kind = str(item.get("kind") or "")
         nodeids: list[dict] = []
         if "existing" in how:
@@ -305,7 +308,7 @@ def attach_links(
     linked = link_items(ds.raw_items, existing, generated, gen_dir)
     by_id = {entry["id"]: entry for entry in linked}
     raw_items = [dict(item, **_link_fields(by_id.get(item.get("id")))) for item in ds.raw_items]
-    items = [dict(_redacted(dict(item))) for item in raw_items]  # type: ignore[arg-type]
+    items = [_redacted_item(item) for item in raw_items]
     return replace(ds, raw_items=raw_items, items=items, runs=runs, summary=summarize_links(linked))
 
 

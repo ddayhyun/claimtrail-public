@@ -261,7 +261,10 @@ def status(project: Path, skills_dir: Path | None = None, state_base: Path | Non
         problem = ""
     except SetupError as exc:
         data, problem = {}, str(exc)
-    hooks = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
+    # 값을 변수에 담아야 타입이 좁혀진다. hooks 가 없거나 객체가 아니면 "훅 없음"으로
+    # 보고한다 -- status 는 읽기만 하므로 이 동작은 그대로다.
+    hooks_value = data.get("hooks")
+    hooks: dict = hooks_value if isinstance(hooks_value, dict) else {}
 
     def present(event: str, suffix: str) -> bool:
         for entry in hooks.get(event) or []:

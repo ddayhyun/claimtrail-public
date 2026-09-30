@@ -467,3 +467,27 @@ def test_제출_명령은_설치본이_없으면_이_파이썬의_m_호출이다
     exe.write_bytes(b"")
     exe.chmod(0o755)
     assert cli_invocation({"PATH": str(fake), "PATHEXT": ".EXE"}) == "claimtrail"
+
+
+# --- 표시용 항목 가림의 반환형 (타입 검사 지적 수정) -----------------------------
+
+
+def test_항목_가림은_사전을_돌려주고_중첩_값까지_가린다():
+    from claimtrail.derive import _redacted_item
+
+    item = dict(_secret_doc()["items"][0], nodeids=[{"nodeid": "t::x password=abc123secret"}])
+    out = _redacted_item(item)
+    assert isinstance(out, dict) and out is not item, "원본을 바꾸지 않고 새 사전을 돌려준다"
+    assert set(out) == set(item) and out["id"] == "D1"
+    text = json.dumps(out, ensure_ascii=False)
+    for secret in SECRETS:
+        assert secret not in text
+    assert "abc123secret" in json.dumps(item, ensure_ascii=False), "원본(연결·해시용)은 그대로다"
+
+
+def test_가린_결과가_사전이_아니면_조용히_넘기지_않고_멈춘다(monkeypatch):
+    from claimtrail import derive
+
+    monkeypatch.setattr(derive, "_redacted", lambda value: ["not", "a", "dict"])
+    with pytest.raises(TypeError, match="사전"):
+        derive._redacted_item({"id": "D1"})
