@@ -73,7 +73,7 @@ def log_of(root: Path, env: dict[str, str]) -> str:
 
 
 def fake_execute(verdict: str = PASS):
-    def _run(root, timeout, deadline=None, detections=None):
+    def _run(root, timeout, deadline=None, detections=None, **kwargs):
         dets = (
             detections
             if detections is not None
@@ -474,7 +474,7 @@ def test_탐지는_한_번만_실행하고_execute에_넘긴다(repo: Path, env,
         count["n"] += 1
         return [Detection(kind="pytest", found=True, signals=["s"])]
 
-    def execute(root, timeout, deadline=None, detections=None):
+    def execute(root, timeout, deadline=None, detections=None, **kwargs):
         seen["dets"] = detections
         return detections, [
             RunResult(kind="pytest", status=PASS, command=["pytest"], exit_code=0)

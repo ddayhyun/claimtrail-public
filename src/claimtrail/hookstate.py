@@ -119,6 +119,10 @@ class HookState:
     # PASS 를 확정한 세션. 새 세션의 첫 Stop 은 이전 세션의 PASS 를 믿지 않는다.
     verified_session_id: str = ""
     evidence_path: str = ""
+    # 자동 도출 목록(2a). digest 는 목록 JSON + 생성 테스트 내용의 해시로, 캐시 재사용
+    # 조건의 한 축이다 -- 코드가 같아도 목록이 바뀌면 이전 PASS 를 재사용하지 않는다.
+    derive_digest: str = ""
+    derive_status: str = ""
     # --- 알림 상태. 검증 상태와 섞지 않는다 ---
     last_notified_session_id: str = ""
     last_notified_signature: str = ""
@@ -309,6 +313,8 @@ def begin_run(
     lock_backend: str = "",
     context_note: str = "",
     execution_context: str = "",
+    derive_digest: str = "",
+    derive_status: str = "",
 ) -> Path:
     """검증을 시작한다고 기록한다.
 
@@ -331,6 +337,8 @@ def begin_run(
             tool_version=__version__,
             policy_hash=policy_hash,
             execution_context=execution_context,
+            derive_digest=derive_digest,
+            derive_status=derive_status,
             verified_session_id="",
             # 과거 판정을 명시적으로 지운다. 남겨두면 실행 중에 이전 PASS 가
             # 현재 판정처럼 읽힌다.
@@ -698,6 +706,8 @@ def build_state(
     previous: HookState | None = None,
     execution_context: str = "",
     session_id: str = "",
+    derive_digest: str = "",
+    derive_status: str = "",
 ) -> HookState:
     """검증 결과를 상태로 옮긴다. 알림 상태는 이전 값을 이어받는다."""
     base = previous or HookState()
@@ -723,6 +733,8 @@ def build_state(
         tool_version=__version__,
         policy_hash=policy_hash,
         execution_context=execution_context,
+        derive_digest=derive_digest,
+        derive_status=derive_status,
         # 연기는 확인한 것이 없으니 어느 세션의 PASS 도 아니다.
         verified_session_id="" if final.is_deferred else session_id,
         evidence_path=str(evidence_path) if evidence_path else "",
@@ -746,6 +758,8 @@ def can_skip(
     tool_version: str = __version__,
     execution_context: str = "",
     session_id: str = "",
+    derive_digest: str = "",
+    derive_ok: bool = True,
 ) -> SkipDecision:
     """건너뛸 수 있는 상태는 'fresh + PASS' 하나뿐이다.
 
@@ -768,6 +782,12 @@ def can_skip(
         )
     if state.policy_hash != policy_hash:
         return SkipDecision(False, "감시 정책 변경")
+    # 도출 목록은 검사 범위의 일부다. 목록이 무효·stale 이거나 이전 실행과 다르면
+    # 같은 코드라도 같은 답을 재사용할 수 없다.
+    if not derive_ok:
+        return SkipDecision(False, "도출 목록이 무효이거나 시점이 맞지 않음")
+    if state.derive_digest != derive_digest:
+        return SkipDecision(False, "도출 목록 변경")
     # 같은 세션의 반복 Stop 만 빠르게 지나간다. 새 세션의 첫 Stop 은 며칠
     # 전 PASS 를 믿지 않는다.
     if not session_id or state.verified_session_id != session_id:
@@ -894,6 +914,8 @@ class StopInput:
     hook_event_name: str = ""
     session_id: str = ""
     cwd: str = ""
+    # 이번 사용자 프롬프트의 식별자(공식 공통 입력). 도출 목록을 이번 작업에 연결하는 열쇠다.
+    prompt_id: str = ""
     stop_hook_active: bool = False
     # 배경 작업이 돌고 있으면 턴이 실제로 끝난 것이 아니다. 지금 잰 것은
     # 곧 달라질 상태이므로, 수십 초를 쓰고 나서 무효 처리할 이유가 없다.
@@ -941,6 +963,7 @@ def parse_stop_input(raw: str) -> StopInput:
         hook_event_name=str(data.get("hook_event_name") or ""),
         session_id=str(data.get("session_id") or ""),
         cwd=str(data.get("cwd") or ""),
+        prompt_id=str(data.get("prompt_id") or ""),
         # bool() 로 감싸면 문자열 "false" 가 참이 된다. 그러면 루프 차단이
         # 거꾸로 동작한다 -- 최초 호출을 재호출로 오인한다.
         stop_hook_active=data.get("stop_hook_active") is True,

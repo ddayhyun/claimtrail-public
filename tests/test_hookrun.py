@@ -71,7 +71,7 @@ def _no_real_verification(monkeypatch):
     즉시 드러낸다. 각 테스트는 필요한 fake 로 덮어쓴다.
     """
 
-    def guard(root, timeout, deadline=None, detections=None):
+    def guard(root, timeout, deadline=None, detections=None, **kwargs):
         raise AssertionError(f"실제 검증이 호출됐다: {root}")
 
     monkeypatch.setattr(hookrun, "execute", guard)
@@ -84,7 +84,7 @@ def _raise_oserror(*a, **k):
 def fake_execute(
     verdict: str = PASS, kind: str = "pytest", note: str = "", reason: str = ""
 ):
-    def _run(root, timeout, deadline=None, detections=None):
+    def _run(root, timeout, deadline=None, detections=None, **kwargs):
         dets = [Detection(kind=kind, found=True, signals=["s"])]
         res = [
             RunResult(
@@ -137,7 +137,7 @@ def test_배경_작업이_돌면_검증하지_않고_연기한다(
 ):
     ran: list[str] = []
 
-    def spy(root, timeout, deadline=None, detections=None):
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
         ran.append("executed")
         return fake_execute()(root, timeout, deadline)
 
@@ -197,7 +197,7 @@ def test_변경이_없으면_두_번째는_건너뛴다(
 ):
     calls: list[int] = []
 
-    def spy(root, timeout, deadline=None, detections=None):
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
         calls.append(1)
         return fake_execute(PASS)(root, timeout, deadline)
 
@@ -220,7 +220,7 @@ def test_복원에_실패하면_건너뛰기를_성공으로_끝내지_않는다
     monkeypatch.setattr(hookrun, "restore_latest", lambda *a, **k: None)
     calls: list[int] = []
 
-    def spy(root, timeout, deadline=None, detections=None):
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
         calls.append(1)
         return fake_execute(PASS)(root, timeout, deadline)
 
@@ -236,7 +236,7 @@ def test_실패하면_다시_검증한다(proj: Path, env: dict[str, str], monke
     run(stop_json(proj), env)
     calls: list[int] = []
 
-    def spy(root, timeout, deadline=None, detections=None):
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
         calls.append(1)
         return fake_execute(FAIL)(root, timeout, deadline)
 
@@ -411,7 +411,7 @@ def test_상태가_손상되면_재검증하고_기록한다(
 
     calls: list[int] = []
 
-    def spy(root, timeout, deadline=None, detections=None):
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
         calls.append(1)
         return fake_execute(PASS)(root, timeout, deadline)
 
@@ -851,7 +851,7 @@ def test_중단된_running을_발견하면_기록하고_재검증한다(
 
     calls: list[int] = []
 
-    def spy(root, timeout, deadline=None, detections=None):
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
         calls.append(1)
         return fake_execute(PASS)(root, timeout, deadline)
 
@@ -992,3 +992,548 @@ def test_복원_중_IO_오류는_훅_고장이_아니다(proj: Path, env: dict[s
     _break_evidence_md(monkeypatch)
     out = run(stop_json(proj), env)
     assert out.reason_code != "hook_internal_error"
+
+
+# --- 판정 정책 개정과 캐시 --------------------------------------------------
+
+
+def test_이전_정책의_PASS_캐시는_재사용하지_않고_새_정책의_PASS_는_재사용한다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    """판정 정책(예: 전부 건너뜀 → 검증 불가)이 바뀌면 같은 파일에 다른 답이 나올 수
+    있다. 옛 정책으로 저장된 PASS 는 버리고, 새 정책으로 확인한 PASS 는 기존 조건대로
+    재사용한다."""
+    import claimtrail.runners.base as runner_base
+
+    calls: list[int] = []
+
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
+        calls.append(1)
+        return fake_execute(PASS)(root, timeout, deadline)
+
+    monkeypatch.setattr(hookrun, "execute", spy)
+
+    # 1) 옛 정책으로 PASS 를 남긴다.
+    monkeypatch.setattr(runner_base, "VERDICT_POLICY", "old-policy")
+    out = run(stop_json(proj), env)
+    assert out.reason_code == "ok" and calls == [1]
+
+    # 2) 정책이 개정됐다. 파일·세션·환경은 그대로여도 다시 검증한다.
+    monkeypatch.undo()
+    monkeypatch.setattr(hookrun, "execute", spy)
+    out = run(stop_json(proj), env)
+    assert out.action == "run", "옛 정책의 PASS 를 재사용했다"
+    assert calls == [1, 1]
+
+    # 3) 새 정책으로 확인한 PASS 는 기존 조건대로 재사용한다.
+    out = run(stop_json(proj), env)
+    assert out.action == "skip" and out.reason_code == "cached_pass"
+    assert calls == [1, 1], "새 정책의 정상 PASS 를 재사용하지 않았다"
+
+
+def test_전부_건너뛴_결과는_훅에서도_검증_불가이고_재호출_0_이어도_판정을_바꾸지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    monkeypatch.setattr(
+        hookrun,
+        "execute",
+        fake_execute(
+            UNVERIFIED,
+            reason="all_skipped",
+            note="JUnit 의 테스트 3개가 모두 skipped 로 표시되어 통과로 확인된 테스트가 없다.",
+        ),
+    )
+    out = run(stop_json(proj), env)
+    assert out.exit_code == 2 and out.notified
+    st = load_state(sd_of(proj, env))
+    assert st is not None and st.verdict == UNVERIFIED
+
+    out = run(stop_json(proj, stop_hook_active=True), env)
+    assert out.exit_code == 0, "같은 결과의 재호출은 루프를 끊는다"
+    assert not out.notified
+    st = load_state(sd_of(proj, env))
+    assert st is not None and st.verdict == UNVERIFIED, "종료 0 은 통과가 아니다"
+    assert st.raw_verdict == UNVERIFIED
+
+
+# --- 자동 도출 목록 연결 (2a) ------------------------------------------------
+
+
+def _derive_doc() -> dict:
+    return {
+        "schema": 1,
+        "status": "performed",
+        "request": "요청 요약",
+        "items": [
+            {
+                "id": "D1",
+                "kind": "requirement",
+                "behavior": "동작 A",
+                "why": "이유",
+                "basis": "README.md:1",
+                "how": {"existing": ["tests/test_a.py::test_a"]},
+            }
+        ],
+    }
+
+
+def _submit_derive(
+    proj: Path, env: dict[str, str], prompt_id: str = "p-1", doc: dict | None = None
+):
+    from claimtrail.derive import submit
+    from claimtrail.hookscan import parse_watch
+
+    return submit(
+        sd_of(proj, env), proj, parse_watch(None), "sess-1", prompt_id, doc or _derive_doc(), []
+    )
+
+
+def _evidence(proj: Path, env: dict[str, str], run_id: str) -> dict:
+    path = run_paths(sd_of(proj, env), run_id)["run_json"]
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _evidence_md(proj: Path, env: dict[str, str], run_id: str) -> str:
+    return run_paths(sd_of(proj, env), run_id)["run_md"].read_text(encoding="utf-8")
+
+
+def test_현재_작업의_도출_목록이_있으면_증빙에_performed_로_실린다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    res = _submit_derive(proj, env)
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.exit_code == 0
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["derive"]["status"] == "performed"
+    assert ev["derive"]["derive_digest"] == res.derive_digest
+    assert [i["id"] for i in ev["derive"]["items"]] == ["D1"]
+    # 가짜 execute 는 증거 파일을 남기지 않는다. 그때 항목은 통과로 채워지지 않고 '증거 없음'이다.
+    assert ev["derive"]["items"][0]["link_status"] == "no_evidence"
+    md = _evidence_md(proj, env, out.run_id)
+    assert "## 자동 도출" in md and "수행" in md and "D1" in md
+    st = load_state(sd_of(proj, env))
+    assert st is not None
+    assert st.derive_digest == res.derive_digest and st.derive_status == "performed"
+
+
+def test_도출_파일이_없으면_기존_검사가_통과해도_미수행으로_표시한다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.exit_code == 0, "2a 에서 도출 미수행은 판정을 바꾸지 않는다"
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["verdict"] == PASS and ev["derive"]["status"] == "not_performed"
+    assert "자동 도출: 미수행" in _evidence_md(proj, env, out.run_id)
+
+
+def test_다른_prompt_id_의_목록은_이번_작업에_쓰지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    _submit_derive(proj, env, prompt_id="p-old")
+    out = run(stop_json(proj, prompt_id="p-new"), env)
+    assert _evidence(proj, env, out.run_id)["derive"]["status"] == "not_performed"
+
+
+def test_prompt_id_가_없으면_미수행이다(proj: Path, env: dict[str, str], monkeypatch):
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    _submit_derive(proj, env, prompt_id="p-1")
+    out = run(stop_json(proj), env)
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["derive"]["status"] == "not_performed"
+    assert "prompt_id" in ev["derive"]["detail"]
+
+
+def test_제출_뒤_코드가_바뀌면_stale_로_표시한다(proj: Path, env: dict[str, str], monkeypatch):
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    _submit_derive(proj, env)
+    (proj / "src" / "a.py").write_text("A = 2\n", encoding="utf-8")
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert _evidence(proj, env, out.run_id)["derive"]["status"] == "stale"
+
+
+def test_도출_목록이_바뀌면_PASS_캐시를_재사용하지_않고_같으면_재사용한다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    calls: list[int] = []
+
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
+        calls.append(1)
+        return fake_execute(PASS)(root, timeout, deadline)
+
+    monkeypatch.setattr(hookrun, "execute", spy)
+    _submit_derive(proj, env)
+    run(stop_json(proj, prompt_id="p-1"), env)
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.reason_code == "cached_pass" and calls == [1]
+
+    doc = _derive_doc()
+    doc["items"][0]["behavior"] = "동작 A (수정)"
+    _submit_derive(proj, env, doc=doc)
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.action == "run" and calls == [1, 1], "목록이 바뀌었는데 옛 PASS 를 재사용했다"
+
+
+def test_무효한_도출_파일이_있으면_캐시를_재사용하지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    calls: list[int] = []
+
+    def spy(root, timeout, deadline=None, detections=None, **kwargs):
+        calls.append(1)
+        return fake_execute(PASS)(root, timeout, deadline)
+
+    monkeypatch.setattr(hookrun, "execute", spy)
+    res = _submit_derive(proj, env)
+    run(stop_json(proj, prompt_id="p-1"), env)
+    res.path.write_text("{broken", encoding="utf-8")
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.action == "run" and calls == [1, 1]
+    assert _evidence(proj, env, out.run_id)["derive"]["status"] == "invalid"
+
+
+def test_해당_없음_제출은_증빙에_이유와_함께_실린다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    doc = {"schema": 1, "status": "not_applicable", "reason": "설명 대화"}
+    _submit_derive(proj, env, doc=doc)
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["derive"]["status"] == "not_applicable" and ev["derive"]["detail"] == "설명 대화"
+
+
+def test_도출_증빙은_훅_산출물에서도_자격증명을_가린다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    doc = _derive_doc()
+    doc["request"] = "요청 password=abc123secret"
+    doc["items"][0]["why"] = "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+    _submit_derive(proj, env, doc=doc)
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    paths = run_paths(sd_of(proj, env), out.run_id)
+    texts = [
+        paths["run_json"].read_text(encoding="utf-8"),
+        paths["run_md"].read_text(encoding="utf-8"),
+        paths["latest_md"].read_text(encoding="utf-8"),
+        (sd_of(proj, env) / "hook.log").read_text(encoding="utf-8"),
+    ]
+    for secret in ("abc123secret", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"):
+        assert all(secret not in t for t in texts), f"훅 산출물에 노출: {secret}"
+    assert "[REDACTED]" in texts[0] and "[REDACTED]" in texts[1]
+
+
+# --- 항목별 실행 증거 연결 (2b) ---------------------------------------------
+
+
+def _real_project(root: Path) -> Path:
+    """실제 pytest 가 도는 작은 프로젝트. 훅 테스트의 자동 가드를 이 테스트만 푼다."""
+    (root / "tests").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[project]\nname = "p"\n', encoding="utf-8")
+    (root / "auth.py").write_text(
+        "def can_login(password_correct, *, locked=False):\n    return password_correct\n",
+        encoding="utf-8",
+    )
+    (root / "tests" / "test_auth.py").write_text(
+        "from auth import can_login\n\n\n"
+        "def test_ok():\n    assert can_login(True) is True\n\n\n"
+        "def test_wrong():\n    assert can_login(False) is False\n",
+        encoding="utf-8",
+    )
+    (root / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = tests\npythonpath = .\naddopts = -p no:cacheprovider\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def _link_doc() -> dict:
+    return {
+        "schema": 1,
+        "status": "performed",
+        "request": "잠금 계정 처리",
+        "items": [
+            {
+                "id": "D1",
+                "kind": "requirement",
+                "behavior": "정상 로그인 허용",
+                "why": "기존 테스트",
+                "basis": "tests/test_auth.py:4",
+                "how": {"existing": ["tests/test_auth.py::test_ok"]},
+            },
+            {
+                "id": "D2",
+                "kind": "requirement",
+                "behavior": "잠긴 계정 거부",
+                "why": "README",
+                "basis": "README.md:1",
+                "how": {"generated": "test_derived.py::test_locked_rejected"},
+            },
+            {
+                "id": "D3",
+                "kind": "requirement",
+                "behavior": "없는 테스트",
+                "why": "오기",
+                "basis": "x",
+                "how": {"existing": ["tests/test_auth.py::test_not_there"]},
+            },
+            {
+                "id": "D4",
+                "kind": "question",
+                "behavior": "빈 비밀번호",
+                "why": "근거 없음",
+                "basis": "",
+                "how": {"none": "사용자 확인 필요"},
+            },
+        ],
+    }
+
+
+def _real_env(tmp_path: Path, monkeypatch) -> Path:
+    from claimtrail import cli
+
+    monkeypatch.setattr(hookrun, "execute", cli.execute)  # 이 테스트만 실제 검증
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return _real_project(tmp_path / "proj")
+
+
+def test_항목이_기존_실행과_생성_실행의_증거에_연결된다(
+    tmp_path: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import submit
+    from claimtrail.hookscan import parse_watch
+
+    proj = _real_env(tmp_path, monkeypatch)
+    gen = tmp_path / "scratch" / "test_derived.py"
+    gen.parent.mkdir(parents=True)
+    gen.write_text(
+        "from auth import can_login\n\n\n"
+        "def test_locked_rejected():\n    assert can_login(True, locked=True) is False\n",
+        encoding="utf-8",
+    )
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", _link_doc(), [gen])
+
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.action == "run", out.reason_code
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["verdict"] == PASS, "기존 검사(2개 통과)의 판정은 그대로다"
+    d = ev["derive"]
+    assert d["status"] == "performed"
+    by_id = {i["id"]: i for i in d["items"]}
+    assert by_id["D1"]["link_status"] == "passed"
+    assert by_id["D2"]["link_status"] == "failed", "결함 구현이라 생성 검사가 실패해야 한다"
+    assert by_id["D3"]["link_status"] == "not_collected"
+    assert by_id["D4"]["link_status"] == "not_run"
+    runs = d["runs"]
+    assert runs["existing"]["invocation_id"] and runs["generated"]["invocation_id"]
+    assert runs["existing"]["invocation_id"] != runs["generated"]["invocation_id"]
+    assert runs["existing"]["session_finished"] is True
+    assert d["summary"]["failed"] == 1 and d["summary"]["passed"] == 1
+    md = _evidence_md(proj, env, out.run_id)
+    assert "통과" in md and "실패" in md and "미수집" in md
+    assert "생성 검사" in md
+
+
+def test_도출이_없으면_증거_플러그인만_붙고_판정은_그대로다(
+    tmp_path: Path, env: dict[str, str], monkeypatch
+):
+    proj = _real_env(tmp_path, monkeypatch)
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["verdict"] == PASS and ev["derive"]["status"] == "not_performed"
+    assert ev["derive"]["runs"]["existing"]["session_finished"] is True
+    assert "generated" not in ev["derive"]["runs"]
+
+
+def test_기존_PASS_캐시를_재사용해도_생성_검사_실패는_증빙에_남는다(
+    tmp_path: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import submit
+    from claimtrail.hookscan import parse_watch
+
+    proj = _real_env(tmp_path, monkeypatch)
+    gen = tmp_path / "scratch" / "test_derived.py"
+    gen.parent.mkdir(parents=True)
+    gen.write_text(
+        "from auth import can_login\n\n\n"
+        "def test_locked_rejected():\n    assert can_login(True, locked=True) is False\n",
+        encoding="utf-8",
+    )
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", _link_doc(), [gen])
+    first = run(stop_json(proj, prompt_id="p-1"), env)
+    assert first.action == "run"
+    second = run(stop_json(proj, prompt_id="p-1"), env)
+    assert second.reason_code == "cached_pass"
+    latest = (sd_of(proj, env) / "evidence.md").read_text(encoding="utf-8")
+    assert "| D2 |" in latest and "실패" in latest, "캐시 재사용으로 생성 검사 실패가 사라졌다"
+    ev = _evidence(proj, env, second.run_id)
+    assert ev["derive"]["summary"]["failed"] == 1
+
+
+def test_증빙의_실행_ID_는_훅이_기대한_값과_대조된다(
+    tmp_path: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import submit
+    from claimtrail.hookscan import parse_watch
+
+    proj = _real_env(tmp_path, monkeypatch)
+    doc = {"schema": 1, "status": "performed", "request": "r", "items": [_link_doc()["items"][0]]}
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", doc, [])
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    meta = _evidence(proj, env, out.run_id)["derive"]["runs"]["existing"]
+    assert meta["invocation_match"] is True
+    assert meta["invocation_id"] == meta["expected_invocation_id"] != ""
+
+
+def test_같은_생성_검사가_정상_구현은_통과_결함_구현은_실패로_연결된다(
+    tmp_path: Path, env: dict[str, str], monkeypatch
+):
+    """2b 성공 조건: 동일한 생성 검사로 정상/결함 구현이 갈리는가."""
+    from claimtrail.derive import submit
+    from claimtrail.hookscan import parse_watch
+
+    proj = _real_env(tmp_path, monkeypatch)
+    gen = tmp_path / "scratch" / "test_derived.py"
+    gen.parent.mkdir(parents=True)
+    gen.write_text(
+        "from auth import can_login\n\n\n"
+        "def test_locked_rejected():\n    assert can_login(True, locked=True) is False\n",
+        encoding="utf-8",
+    )
+    doc = {"schema": 1, "status": "performed", "request": "r", "items": [_link_doc()["items"][1]]}
+    results = {}
+    cases = (("buggy", "password_correct"), ("fixed", "password_correct and not locked"))
+    for label, body in cases:
+        (proj / "auth.py").write_text(
+            f"def can_login(password_correct, *, locked=False):\n    return {body}\n",
+            encoding="utf-8",
+        )
+        submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", f"p-{label}", doc, [gen])
+        out = run(stop_json(proj, prompt_id=f"p-{label}"), env)
+        results[label] = _evidence(proj, env, out.run_id)["derive"]["items"][0]["link_status"]
+    assert results == {"buggy": "failed", "fixed": "passed"}
+
+
+# --- 활성화 표식과 미수행 표시 (2c) ---------------------------------------------
+
+
+def test_활성_프로젝트에서_도출_파일이_없으면_PASS_와_별개로_미수행을_표시한다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    enable(sd_of(proj, env))
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.exit_code == 2 and out.reason_code == "derive_notice", (
+        "2d: 활성 프로젝트의 미수행은 최초 호출에서 세션을 깨운다(판정은 그대로)"
+    )
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["verdict"] == PASS
+    assert ev["derive"]["status"] == "not_performed" and ev["derive"]["active"] is True
+    md = _evidence_md(proj, env, out.run_id)
+    assert "자동 도출: 미수행" in md and "활성" in md
+    log = (sd_of(proj, env) / "hook.log").read_text(encoding="utf-8")
+    assert "not_performed" in log and "활성" in log
+
+
+def test_비활성_프로젝트는_비활성으로_표시하고_예전처럼_캐시한다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["derive"]["status"] == "not_performed" and ev["derive"]["active"] is False
+    assert "비활성" in _evidence_md(proj, env, out.run_id)
+    assert run(stop_json(proj, prompt_id="p-1"), env).reason_code == "cached_pass"
+
+
+# --- 세션 되돌림 (2d) -------------------------------------------------------------
+
+
+def test_활성_미수행은_최초_호출에서_깨우고_같은_상태의_재호출은_0으로_끊는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    enable(sd_of(proj, env))
+    first = run(stop_json(proj, prompt_id="p-1"), env)
+    assert first.exit_code == 2 and first.reason_code == "derive_notice"
+    assert "미수행" in first.detail and "derive submit" in first.detail
+    assert "--session-id sess-1" in first.detail and "--prompt-id p-1" in first.detail
+    assert _evidence(proj, env, first.run_id)["verdict"] == PASS
+    log = (sd_of(proj, env) / "hook.log").read_text(encoding="utf-8")
+    assert "derive_notice" in log
+
+    again = run(stop_json(proj, prompt_id="p-1", stop_hook_active=True), env)
+    assert again.exit_code == 0, "같은 미수행을 또 알리면 무한 루프다"
+    assert again.reason_code != "cached_pass", "활성+알림 사유가 있으면 이전 PASS 를 재사용 안 함"
+    codes = [
+        run(stop_json(proj, prompt_id="p-1", stop_hook_active=True), env).exit_code
+        for _ in range(3)
+    ]
+    assert codes == [0, 0, 0]
+
+
+def test_활성_해당없음_제출은_깨우지_않는다(proj: Path, env: dict[str, str], monkeypatch):
+    from claimtrail.derive import enable, submit
+    from claimtrail.hookscan import parse_watch
+
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    enable(sd_of(proj, env))
+    doc = {"schema": 1, "status": "not_applicable", "reason": "설명 대화"}
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", doc, [])
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.exit_code == 0 and out.reason_code == "ok"
+
+
+def test_활성_생성_검사_실패는_깨우고_판정은_그대로_비활성은_깨우지_않는다(
+    tmp_path: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable, submit
+    from claimtrail.hookscan import parse_watch
+
+    proj = _real_env(tmp_path, monkeypatch)
+    gen = tmp_path / "scratch" / "test_derived.py"
+    gen.parent.mkdir(parents=True)
+    gen.write_text(
+        "from auth import can_login\n\n\n"
+        "def test_locked_rejected():\n    assert can_login(True, locked=True) is False\n",
+        encoding="utf-8",
+    )
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", _link_doc(), [gen])
+    inactive = run(stop_json(proj, prompt_id="p-1"), env)
+    assert inactive.exit_code == 0 and inactive.reason_code == "ok", "비활성은 2b 그대로"
+
+    enable(sd_of(proj, env))
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-2", _link_doc(), [gen])
+    out = run(stop_json(proj, prompt_id="p-2"), env)
+    assert out.exit_code == 2 and out.reason_code == "derive_notice"
+    assert "D2" in out.detail and "D3" in out.detail and "D1" not in out.detail
+    assert _evidence(proj, env, out.run_id)["verdict"] == PASS
+    again = run(stop_json(proj, prompt_id="p-2", stop_hook_active=True), env)
+    assert again.exit_code == 0
+
+
+def test_새_요청의_첫_호출은_이전_요청의_억제를_이어받지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    """서명에 prompt_id 가 없어도 요청별로 알린다: 억제는 재호출(stop_hook_active)에만 걸린다."""
+    from claimtrail.derive import enable
+
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    enable(sd_of(proj, env))
+    assert run(stop_json(proj, prompt_id="p-1"), env).exit_code == 2
+    assert run(stop_json(proj, prompt_id="p-1", stop_hook_active=True), env).exit_code == 0
+    # 같은 세션·같은 코드·같은 미수행이지만 새 요청의 첫 호출이다 -- 다시 알린다.
+    second = run(stop_json(proj, prompt_id="p-2"), env)
+    assert second.exit_code == 2 and second.reason_code == "derive_notice"
+    assert "--prompt-id p-2" in second.detail
+    assert run(stop_json(proj, prompt_id="p-2", stop_hook_active=True), env).exit_code == 0

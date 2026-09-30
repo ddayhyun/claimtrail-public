@@ -33,6 +33,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 # 종료 신호 뒤 스스로 끝나기를 기다리는 시간. 지나면 강제 종료한다.
@@ -184,6 +185,7 @@ def run_captured(
     *,
     cwd: str,
     timeout: float,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """stdout/stderr 를 UTF-8 로 수집하며 실행한다. `subprocess.run(capture_output=True,
     text=True, encoding="utf-8", errors="replace", timeout=...)` 과 같은 계약이되,
@@ -201,6 +203,7 @@ def run_captured(
         encoding="utf-8",
         errors="replace",
         start_new_session=not _WINDOWS,
+        env=None if env is None else dict(env),
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)

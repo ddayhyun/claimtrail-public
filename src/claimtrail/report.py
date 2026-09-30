@@ -220,7 +220,15 @@ def build_markdown(
         lines.extend(_scope_lines(config, results, verdict))
 
     if verdict == UNVERIFIED:
-        lines.append("> 검증을 실행하지 못했다. **이것은 통과가 아니다.**")
+        # 실행은 됐는데 확인한 것이 없는 결과(전부 건너뜀)가 있으면 "실행하지 못했다" 는
+        # 거짓이다. 실행 사실과 확인 여부를 구분해 적는다.
+        if any(r.status == UNVERIFIED and r.total is not None for r in results):
+            lines.append(
+                "> 실행은 됐지만 확인한 것이 없는 검사가 있다(예: 전부 건너뜀). "
+                "**이것은 통과가 아니다.**"
+            )
+        else:
+            lines.append("> 검증을 실행하지 못했다. **이것은 통과가 아니다.**")
         lines.append("")
 
     # --- 실행 환경 -------------------------------------------------------
@@ -235,7 +243,10 @@ def build_markdown(
     lines.append("## 확인한 것")
     lines.append("")
 
-    ran = [r for r in results if r.status in (PASS, FAIL)]
+    # 프로세스가 실제로 돌아 개수를 센 결과는 판정이 검증 불가여도 표에 남긴다(전부
+    # 건너뜀). 숫자·명령·종료 코드는 실행 사실이다. 센 것이 없는 검증 불가(타임아웃·
+    # 미설치)는 예전처럼 표 밖이다 -- 모든 검증 불가를 '실행한 검사' 로 승격하지 않는다.
+    ran = [r for r in results if r.status in (PASS, FAIL) or r.total is not None]
     if not ran:
         lines.append("실제로 실행된 검증이 없다.")
         lines.append("")

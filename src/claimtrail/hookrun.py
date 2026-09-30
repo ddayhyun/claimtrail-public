@@ -23,6 +23,19 @@ from typing import Callable
 
 from . import __version__
 from .cli import execute
+from .derive import (
+    GENERATED_DIR,
+    PERFORMED,
+    DeriveStatus,
+    cli_invocation,
+    derive_enabled,
+    derive_markdown,
+    derive_notice,
+    derive_section,
+    load_derive,
+    notice_signature,
+)
+from .derive_run import attach_links, load_evidence, run_generated
 from .detect import detect_all
 from .hookcontext import execution_context
 from .hooklock import LockUnavailable, RunLock, backend_name
@@ -58,7 +71,7 @@ from .hookstate import (
     validate_evidence,
 )
 from .report import build_json, build_markdown, overall_verdict
-from .runners.base import PASS, RUN_TIMEOUT, UNVERIFIED
+from .runners.base import PASS, RUN_TIMEOUT, UNVERIFIED, RunResult
 
 # 훅 전체가 쓸 수 있는 시간. Stop 훅 설정의 timeout 보다 짧아야 한다.
 DEFAULT_BUDGET_SEC = 240
@@ -94,6 +107,15 @@ def _int_env(env: dict[str, str], key: str, default: int) -> int:
         return max(1, int(env[key]))
     except (KeyError, ValueError):
         return default
+
+
+def _with_derive(markdown: str, derive_lines: list[str]) -> str:
+    """Markdown 증빙의 '## 확인한 것' 앞에 자동 도출 절을 끼운다. 표식이 없으면 끝에 붙인다."""
+    block = chr(10).join(derive_lines)
+    marker = "## 확인한 것"
+    if marker in markdown:
+        return markdown.replace(marker, block + chr(10) + marker, 1)
+    return markdown.rstrip(chr(10)) + chr(10) + chr(10) + block
 
 
 @dataclass
@@ -215,6 +237,10 @@ class _Runner:
         base: HookState | None,
         notify_previous: HookState | None,
         cas: bool,
+        derive_digest: str = "",
+        derive_status: str = "",
+        notice_text: str = "",
+        notice_sig: str = "",
     ) -> tuple[bool, bool]:
         """판정을 확정하고 알림 여부를 정한다. (저장 성공, 알림함) 을 돌려준다.
 
@@ -235,6 +261,8 @@ class _Runner:
             base,
             execution_context=self.context_digest,
             session_id=self.stop.session_id,
+            derive_digest=derive_digest,
+            derive_status=derive_status,
         )
         notified = False
 
@@ -251,6 +279,14 @@ class _Runner:
                 notify_previous, signature, self.stop.session_id, self.stop.stop_hook_active
             )
             state = apply_notification(state, decision, signature, self.stop.session_id)
+            notified = decision.notify
+        elif not final.is_deferred and notice_text:
+            # PASS 인데 도출 축이 미비하다. 같은 알림 예산·서명 중복 제거를 쓴다 --
+            # 같은 미수행을 재호출마다 알리면 무한 루프다.
+            decision = should_notify(
+                notify_previous, notice_sig, self.stop.session_id, self.stop.stop_hook_active
+            )
+            state = apply_notification(state, decision, notice_sig, self.stop.session_id)
             notified = decision.notify
 
         assert self.state_dir is not None
@@ -438,6 +474,24 @@ class _Runner:
 
         before = self._timed("fp_before", fingerprint, root, policy)
 
+        # 이번 작업(상태 폴더·세션·프롬프트)의 도출 목록. 없으면 미수행이고, 그것은
+        # 기존 검사 판정을 바꾸지 않는다 -- 다만 증빙에 별개의 축으로 남는다.
+        # 활성화 표식은 미수행의 뜻만 가른다(기대했는데 안 함 / 애초에 안 켬).
+        derive = self._timed(
+            "derive",
+            load_derive,
+            self.state_dir,
+            self.stop.session_id,
+            self.stop.prompt_id,
+            before.digest,
+            policy_hash,
+            active=derive_enabled(self.state_dir),
+        )
+        self.log("derive", derive.status, derive.detail)
+        # 활성 프로젝트의 미수행·무효·stale 은 세션을 깨울 사유다. 사유가 있으면 이전 PASS 를
+        # 재사용하지 않는다 -- 재사용 경로는 알림 이력을 남기지 못해 루프를 끊을 수 없다.
+        pre_notice = derive_notice(derive)
+
         # 배경 작업이 돌면 검증하지 않고 연기한다. 돌리고 나서 강등하는 것과
         # 다르다 -- 지금 잰 것은 곧 달라질 상태다. 알림 예산도 쓰지 않는다.
         if self.stop.background_active:
@@ -467,6 +521,8 @@ class _Runner:
                 self.state_dir,
                 execution_context=self.context_digest,
                 session_id=self.stop.session_id,
+                derive_digest=derive.derive_digest,
+                derive_ok=derive.cache_ok and not pre_notice,
             )
         if decision.skip:
             assert previous is not None
@@ -478,7 +534,45 @@ class _Runner:
                 restored = None
                 self.log("restorefail", "restore_failed", f"{previous.run_id}: {exc}")
             if restored is not None:
-                self.log("skip", "cached_pass", f"{decision.reason} | {self._timing_note()}")
+                # 재사용하는 것은 기존 검사의 PASS 증빙이다. 도출 항목을 확인했다는 근거가
+                # 아니다 -- 2a 의 항목은 전부 실행 증거 미연결이다.
+                self.log(
+                    "skip",
+                    "cached_pass",
+                    f"{decision.reason} (기존 검사 PASS 재사용; 도출 항목 확인 근거 아님) "
+                    f"| {self._timing_note()}",
+                )
+                # 활성 프로젝트: 복원한 증빙의 도출 절에 미확인 항목이 남아 있으면 캐시가
+                # 그것을 숨기게 두지 않는다. 같은 서명·같은 예산으로 한 번만 깨운다.
+                if derive.active:
+                    cached = self._restored_derive(previous.run_id)
+                    cached_notice = derive_notice(cached) if cached else ""
+                    if cached and cached_notice:
+                        sig = notice_signature(before.digest or "", cached)
+                        decision_n = should_notify(
+                            previous, sig, self.stop.session_id, self.stop.stop_hook_active
+                        )
+                        try:
+                            save_state(
+                                self.state_dir,
+                                apply_notification(previous, decision_n, sig, self.stop.session_id),
+                            )
+                        except OSError as exc:
+                            self.log("statefail", "state_write_failed", str(exc))
+                        self.log(
+                            "derive_notice",
+                            "notified" if decision_n.notify else "suppressed",
+                            f"(cached) {cached_notice}",
+                        )
+                        if decision_n.notify:
+                            return Outcome(
+                                2,
+                                "skip",
+                                "derive_notice",
+                                self._derive_message(cached_notice, PASS, root),
+                                notified=True,
+                                run_id=previous.run_id,
+                            )
                 return Outcome(0, "skip", "cached_pass", run_id=previous.run_id)
             # 건너뛸 근거를 다시 세우지 못했다. 성공으로 끝내지 않는다.
             self.log("restorefail", "restore_failed", previous.run_id)
@@ -492,9 +586,16 @@ class _Runner:
             backend_name(),
             note,
             execution_context=self.context_digest,
+            derive_digest=derive.derive_digest,
+            derive_status=derive.status,
         )
         base = load_state(self.state_dir)
 
+        # 기존 검사 실행에 증거 플러그인을 붙인다(재실행 없음). 증거 파일은 이 실행의
+        # 폴더에 남고, 도출 항목은 그 증거에만 연결된다.
+        evidence_dir = self.state_dir / "runs" / f"{run_id}.evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        existing_inv = new_run_id()
         detections, results = self._timed(
             "execute",
             execute,
@@ -502,8 +603,13 @@ class _Runner:
             self._runner_timeout(),
             self.deadline,
             detections=detections,
+            evidence_dir=evidence_dir,
+            invocation_id=existing_inv,
         )
         verdict = overall_verdict(results)
+        derive = self._link_derive(derive, root, evidence_dir, existing_inv)
+        # 연결까지 끝난 뒤의 되돌림 사유. 판정(verdict)과는 별개의 축이다.
+        notice = derive_notice(derive)
         # note 를 파싱하지 않는다. 사람이 읽는 문구를 판단 근거로 쓰면
         # 문구를 다듬는 순간 판단이 깨진다. 러너가 남긴 원인 코드만 본다.
         timed_out = any(
@@ -513,12 +619,13 @@ class _Runner:
         paths = run_paths(self.state_dir, run_id)
 
         def write_evidence() -> tuple[str, str]:
-            payload = json.dumps(
-                build_json(root, detections, results), ensure_ascii=False, indent=2
-            )
+            evidence = build_json(root, detections, results)
+            evidence["derive"] = derive_section(derive)
+            payload = json.dumps(evidence, ensure_ascii=False, indent=2)
             paths["tmp_json"].write_text(payload, encoding="utf-8")
             paths["tmp_md"].write_text(
-                build_markdown(root, detections, results), encoding="utf-8"
+                _with_derive(build_markdown(root, detections, results), derive_markdown(derive)),
+                encoding="utf-8",
             )
             return self.crosscheck(paths["tmp_json"], root, verdict)
 
@@ -547,6 +654,10 @@ class _Runner:
             self.record,
             run_id, before, after, final, policy_hash, archived, base, previous,
             cas=True,
+            derive_digest=derive.derive_digest,
+            derive_status=derive.status,
+            notice_text=notice,
+            notice_sig=notice_signature(before.digest or "", derive),
         )
         if not saved:
             self.log("casfail", "state_write_conflict", final.reason_code)
@@ -586,15 +697,117 @@ class _Runner:
                 return Outcome(
                     self.unrecorded_exit(), "run", "publish_failed", run_id=run_id
                 )
+            if notice:
+                # 판정은 PASS 로 저장됐다. 깨우는 것은 도출 축의 미비이며, 같은 사유는
+                # record 가 남긴 알림 이력으로 한 번만 전달된다(루프 차단).
+                self.log("derive_notice", "notified" if notified else "suppressed", notice)
+                if notified:
+                    return Outcome(
+                        2,
+                        "run",
+                        "derive_notice",
+                        self._derive_message(notice, final.verdict, root),
+                        notified=True,
+                        published=True,
+                        run_id=run_id,
+                    )
             return Outcome(0, "run", final.reason_code, published=True, run_id=run_id)
 
+        detail = ""
+        if notice:
+            # 실패 알림에 도출 축의 미비를 덧붙인다. 알림 여부는 실패 서명이 정한다.
+            self.log("derive_notice", "with_failure", notice)
+            detail = self._derive_message(notice, final.verdict, root)
         return Outcome(
             self.fail_exit(notified),
             "run",
             final.reason_code,
+            detail,
             notified=notified,
             published=published,
             run_id=run_id,
+        )
+
+    def _restored_derive(self, run_id: str) -> DeriveStatus | None:
+        """복원한 실행 증빙(JSON)의 도출 절을 되돌림 판단용으로 다시 읽는다. 없으면 None."""
+        assert self.state_dir is not None
+        try:
+            data = json.loads(run_paths(self.state_dir, run_id)["run_json"].read_text("utf-8"))
+        except (OSError, ValueError):
+            return None
+        section = data.get("derive") if isinstance(data, dict) else None
+        if not isinstance(section, dict) or section.get("status") != PERFORMED:
+            return None
+        items = section.get("items")
+        return DeriveStatus(
+            PERFORMED,
+            str(section.get("detail") or ""),
+            str(section.get("derive_digest") or ""),
+            [dict(i) for i in items if isinstance(i, dict)] if isinstance(items, list) else [],
+            active=True,
+        )
+
+    def _derive_message(self, notice: str, verdict: str, root: Path) -> str:
+        """세션에 보내는 되돌림 문구. 무엇이 비었는지, 판정은 그대로인지, 어떻게 제출하는지."""
+        cli = cli_invocation(self.env)
+        ids = f"--session-id {self.stop.session_id} --prompt-id {self.stop.prompt_id}"
+        target = root.as_posix()
+        assert self.state_dir is not None
+        evidence = (self.state_dir / "evidence.md").as_posix()
+        return (
+            f"[claimtrail 자동 도출] {notice}. 기존 검사 판정 {verdict} 은 그대로다"
+            f"(증빙 {evidence}). 제출·재제출: {cli} derive submit {target} {ids} "
+            "--file <목록.json> [--generated <생성 테스트.py>]; 설명만 한 대화면 같은 명령에 "
+            '--not-applicable --reason "<이유>". '
+            "검사를 통과시키려고 단언을 약화하거나 대상을 줄이지 말 것."
+        )
+
+    def _link_derive(self, derive, root: Path, evidence_dir: Path, existing_inv: str):
+        """생성 검사를 따로 돌리고(있을 때만), 항목을 두 실행의 증거에 연결한다.
+
+        생성 검사 결과는 기존 검사 판정(verdict)에 넣지 않는다 -- 결함 후보이지 확정이
+        아니고, 새 흐름을 통과 조건으로 강제하지 않는다. 증빙의 자동 도출 절에만 남는다.
+        """
+        existing_path = evidence_dir / "existing.json"
+        existing = load_evidence(existing_path)
+        gen_path = gen_result = generated = None
+        gen_inv = ""
+        wants_generated = derive.status == PERFORMED and any(
+            isinstance(i.get("how"), dict) and "generated" in i["how"] for i in derive.raw_items
+        )
+        if wants_generated:
+            gen_dir = Path(derive.path).parent / GENERATED_DIR
+            gen_path = evidence_dir / "generated.json"
+            remaining = self.deadline - self.clock()
+            if remaining <= 0:
+                gen_result = RunResult(
+                    kind="derived-tests",
+                    status=UNVERIFIED,
+                    note="전체 검증 예산이 끝나 생성 검사를 실행하지 않았다.",
+                    reason_code=RUN_TIMEOUT,
+                )
+            else:
+                gen_inv = new_run_id()
+                gen_result = self._timed(
+                    "generated",
+                    run_generated,
+                    root,
+                    gen_dir,
+                    gen_path,
+                    max(1, min(self._runner_timeout(), int(remaining))),
+                    gen_inv,
+                )
+                generated = load_evidence(gen_path)
+            self.log("generated", gen_result.status, gen_result.note or gen_result.summary)
+        return attach_links(
+            derive,
+            existing,
+            existing_path,
+            generated,
+            gen_path,
+            gen_result,
+            expected_existing=existing_inv,
+            expected_generated=gen_inv,
         )
 
     def _defer(

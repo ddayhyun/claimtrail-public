@@ -5,13 +5,17 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
 from . import __version__
 from .config import CONFIG_FILENAME, Config, ConfigError, find_config
+from .derive import DeriveError
+from .derive import submit as submit_derive
 from .detect import Detection, detect_all
 from .environment import collect_environment
 from .report import EXIT_CODE, build_json, build_markdown, overall_verdict
@@ -67,6 +71,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"검증 제한 시간(초, 기본 {DEFAULT_TIMEOUT})",
     )
     run_cmd.add_argument("--config", help=config_help)
+
+    # 세션이 도출한 확인 목록을 도구에 제출한다. 입력 지문·생성 테스트 해시는 여기서
+    # 붙이고, Stop 훅이 같은 작업(session_id·prompt_id)의 파일만 읽는다.
+    derive_cmd = sub.add_parser("derive", help="자동 도출 목록을 제출한다 (Stop 훅이 읽는다)")
+    derive_sub = derive_cmd.add_subparsers(dest="derive_command", required=True)
+    submit_cmd = derive_sub.add_parser("submit", help="도출 목록(JSON)과 생성 테스트를 제출한다")
+    submit_cmd.add_argument("path", nargs="?", default=".", help="대상 경로 (기본: 현재 폴더)")
+    submit_cmd.add_argument("--session-id", required=True, help="훅이 준 session_id")
+    submit_cmd.add_argument("--prompt-id", required=True, help="훅이 준 prompt_id")
+    submit_cmd.add_argument("--file", help="도출 목록 JSON 파일")
+    submit_cmd.add_argument(
+        "--generated", nargs="*", default=[], help="목록이 참조하는 생성 테스트 파일"
+    )
+    submit_cmd.add_argument(
+        "--not-applicable", action="store_true", help="검사 대상이 없는 요청임을 제출한다"
+    )
+    submit_cmd.add_argument("--reason", default="", help="--not-applicable 의 이유")
+
+    # 설치·해제·상태. 프로젝트 .claude/settings.json 에 우리 훅 항목만 더하고 뺀다.
+    for name, help_text in (
+        ("enable", "Stop·UserPromptSubmit 훅과 활성화 표식·스킬을 설치한다"),
+        ("disable", "우리 훅 항목과 활성화 표식을 뺀다 (스킬·래퍼는 남긴다)"),
+        ("status", "훅·표식·스킬 설치 여부를 보고한다"),
+    ):
+        setup_cmd = derive_sub.add_parser(name, help=help_text)
+        setup_cmd.add_argument("path", nargs="?", default=".", help="대상 경로 (기본: 현재 폴더)")
+        setup_cmd.add_argument("--skills-dir", help="스킬을 둔 폴더 (기본: ~/.claude/skills)")
     return parser
 
 
@@ -108,7 +139,14 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     return 0 if any(d.found for d in detections) else 2
 
 
-def _run_one(kind: str, root: Path, timeout: int, config: Config | None) -> RunResult:
+def _run_one(
+    kind: str,
+    root: Path,
+    timeout: int,
+    config: Config | None,
+    evidence_dir: Path | None = None,
+    invocation_id: str = "",
+) -> RunResult:
     """러너 하나를 설정에 맞춰 부른다.
 
     항상 RUNNERS 를 거친다 -- 훅 테스트는 이 표를 가짜로 바꿔 호출 횟수를 센다.
@@ -120,6 +158,11 @@ def _run_one(kind: str, root: Path, timeout: int, config: Config | None) -> RunR
         extra["paths"] = config.pytest_paths
     if kind == "format" and config is not None and config.format_tool:
         extra["tool"] = config.format_tool
+    if kind == "pytest" and evidence_dir is not None:
+        # 훅이 넘긴다. 기존 pytest 실행에 증거 플러그인을 붙여 식별자별 결과를 남긴다.
+        extra["evidence_path"] = evidence_dir / "existing.json"
+        # 호출자(훅)가 정한 ID 를 쓴다. 증거 파일의 ID 와 대조해 다른 실행의 파일을 걸러낸다.
+        extra["invocation_id"] = invocation_id or uuid.uuid4().hex
     return runner(root, timeout=timeout, **extra)
 
 
@@ -129,6 +172,8 @@ def execute(
     deadline: float | None = None,
     detections: list[Detection] | None = None,
     config: Config | None = None,
+    evidence_dir: Path | None = None,
+    invocation_id: str = "",
 ) -> tuple[list[Detection], list[RunResult]]:
     """탐지하고 실행한다. 한 번만.
 
@@ -155,7 +200,7 @@ def execute(
         if d.kind not in RUNNERS or not d.found:
             continue
         if deadline is None:
-            results.append(_run_one(d.kind, root, timeout, config))
+            results.append(_run_one(d.kind, root, timeout, config, evidence_dir, invocation_id))
             continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -168,7 +213,16 @@ def execute(
                 )
             )
             continue
-        results.append(_run_one(d.kind, root, max(1, min(timeout, int(remaining))), config))
+        results.append(
+            _run_one(
+                d.kind,
+                root,
+                max(1, min(timeout, int(remaining))),
+                config,
+                evidence_dir,
+                invocation_id,
+            )
+        )
     return detections, results
 
 
@@ -206,6 +260,86 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return EXIT_CODE[overall_verdict(results, required)]
 
 
+def _cmd_derive_submit(args: argparse.Namespace) -> int:
+    """도출 목록을 상태 폴더에 기록한다. 훅과 같은 루트·상태 폴더·감시 정책을 쓴다."""
+    from .hookscan import parse_watch, resolve_root
+    from .hookstate import state_dir_for
+
+    root_res = resolve_root(_resolve(args.path), os.environ)
+    if not root_res.scope_known:
+        print(f"오류: 감시 범위를 정할 수 없다 — {root_res.reason}", file=sys.stderr)
+        return EXIT_CODE[UNVERIFIED]
+    try:
+        policy = parse_watch(os.environ.get("CLAIMTRAIL_WATCH"))
+    except ValueError as exc:
+        print(f"오류: CLAIMTRAIL_WATCH — {exc}", file=sys.stderr)
+        return EXIT_CODE[UNVERIFIED]
+    base = os.environ.get("CLAIMTRAIL_STATE_DIR")
+    state_dir = state_dir_for(root_res.root, Path(base) if base else None)
+
+    if args.not_applicable:
+        doc: object = {"schema": 1, "status": "not_applicable", "reason": args.reason}
+    elif args.file:
+        try:
+            doc = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"오류: 도출 파일을 읽지 못했다 — {exc}", file=sys.stderr)
+            return EXIT_CODE[UNVERIFIED]
+    else:
+        print("오류: --file 또는 --not-applicable 이 필요하다", file=sys.stderr)
+        return EXIT_CODE[UNVERIFIED]
+
+    try:
+        res = submit_derive(
+            state_dir,
+            root_res.root,
+            policy,
+            args.session_id,
+            args.prompt_id,
+            doc if isinstance(doc, dict) else {},
+            [Path(p) for p in args.generated],
+        )
+    except DeriveError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return EXIT_CODE[UNVERIFIED]
+    print(
+        json.dumps(
+            {
+                "path": str(res.path),
+                "status": res.status,
+                "derive_digest": res.derive_digest,
+                "input_fingerprint": res.input_fingerprint,
+                "session_id": args.session_id,
+                "prompt_id": args.prompt_id,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def _cmd_derive_setup(args: argparse.Namespace) -> int:
+    """derive enable / disable / status. 실패하면 아무것도 바꾸지 않고 2 로 끝난다."""
+    from . import setup_hooks
+
+    base = os.environ.get("CLAIMTRAIL_STATE_DIR")
+    state_base = Path(base) if base else None
+    skills = getattr(args, "skills_dir", None)
+    skills_dir = Path(skills).expanduser() if skills else None
+    try:
+        if args.derive_command == "enable":
+            report = setup_hooks.enable(_resolve(args.path), skills_dir, state_base)
+        elif args.derive_command == "disable":
+            report = setup_hooks.disable(_resolve(args.path), skills_dir, state_base)
+        else:
+            report = setup_hooks.status(_resolve(args.path), skills_dir, state_base)
+    except setup_hooks.SetupError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return EXIT_CODE[UNVERIFIED]
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def utf8_stdio() -> None:
     """콘솔 코드페이지가 무엇이든 UTF-8 로 읽고 쓴다.
 
@@ -229,6 +363,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command == "detect":
         return _cmd_detect(args)
+    if args.command == "derive":
+        if args.derive_command == "submit":
+            return _cmd_derive_submit(args)
+        return _cmd_derive_setup(args)
     return _cmd_run(args)
 
 

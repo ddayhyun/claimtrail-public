@@ -77,7 +77,7 @@ def _wire(monkeypatch, clock: Clock, *, fp=5.0, detect=1.0, context=2.0, execute
         clock.advance(context)
         return ContextFingerprint("ctx")
 
-    def fake_exec(root, timeout, deadline=None, detections=None):
+    def fake_exec(root, timeout, deadline=None, detections=None, **kwargs):
         clock.advance(execute)
         return detections, [RunResult(kind="pytest", status=PASS, command=["pytest"], exit_code=0)]
 

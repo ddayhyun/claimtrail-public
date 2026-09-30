@@ -25,6 +25,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+# 판정 정책 개정 식별자를 캐시 키에 넣기 위해서만 쓴다. 호출 시점의 모듈 속성을 읽는다.
+from .runners import base as _runner_base
+
 # 이 파일이 있으면 그 폴더를 프로젝트 루트로 본다. 검증 설정 파일
 # (ruff.toml, mypy.ini 등)은 루트 표지로 쓰지 않는다 -- 하위 폴더에도
 # 놓일 수 있어 루트를 잘못 좁힌다.
@@ -241,6 +244,9 @@ class WatchPolicy:
                 "doc_dirs": sorted(DOC_DIRS),
                 "root_doc_prefixes": sorted(ROOT_DOC_PREFIXES),
                 "skip_dirs": sorted(SKIP_DIRS),
+                # 감시 범위가 같아도 판정 규칙이 바뀌면 같은 파일에 다른 답이 나온다.
+                # 옛 규칙의 PASS 를 재사용하지 않도록 정책 식별자를 함께 해시한다.
+                "verdict_policy": _runner_base.VERDICT_POLICY,
             },
             sort_keys=True,
             ensure_ascii=False,
