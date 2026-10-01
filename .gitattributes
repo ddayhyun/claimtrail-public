@@ -1,0 +1,3 @@
+# 셸 스크립트는 어떤 체크아웃 설정(core.autocrlf)에서도 LF 로 푼다. bash 는 CRLF 줄 끝을
+# 보장하지 않으며, 훅 래퍼는 사용자 PC 의 Git Bash 가 직접 실행한다.
+*.sh text eol=lf
