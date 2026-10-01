@@ -15,6 +15,7 @@ message 가 아니라 본문의 마지막 `E ` 줄에서 꺼낸다.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from typing import Any
 # (claimtrail.runners.pytest_runner 에서 RunResult 등을 가져오는 코드)를
 # 깨지 않기 위한 것이다.
 from .base import (  # noqa: F401
+    ALL_SKIPPED,
     COLLECTION_ERROR,
     DEFAULT_TIMEOUT,
     FAIL,
@@ -98,7 +100,8 @@ def _parse_junit(xml_path: Path) -> dict | None:
         # 요소를 직접 센다 -- '실행된 테스트' 는 이 둘의 차이다.
         "cases": 0,
         "collection_cases": 0,
-        # <skipped> 가 붙은 testcase. 수집은 됐지만 돌지 않았다.
+        # <skipped> 가 붙은 testcase. 결과가 통과·실패로 확인되지 않은 항목이다(본문 안
+        # skip·xfail 도 여기 든다 -- 본문 미실행을 뜻하지 않는다).
         "skipped_cases": 0,
     }
     failures: list[Failure] = []
@@ -140,10 +143,38 @@ def _diagnostic_tail(stdout: str, stderr: str, limit: int = 6) -> str:
     return " | ".join(picked[-limit:])
 
 
+EVIDENCE_PLUGIN = "claimtrail.evidence"
+
+
+def _evidence_env(
+    evidence_path: Path | None, invocation_id: str, env_extra: dict[str, str] | None
+) -> dict[str, str] | None:
+    """증거 플러그인을 켤 때의 child 환경. 이 패키지가 child 에서도 import 되도록 패키지
+    부모 경로를 PYTHONPATH 앞에 둔다 -- 설치본이 아니라 src 로 도는 경우가 있다."""
+    if evidence_path is None and not env_extra:
+        return None
+    env = dict(os.environ)
+    if env_extra:
+        env.update(env_extra)
+    if evidence_path is not None:
+        package_root = str(Path(__file__).resolve().parents[2])
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = package_root + (os.pathsep + existing if existing else "")
+        env["CLAIMTRAIL_EVIDENCE_PATH"] = str(evidence_path)
+        env["CLAIMTRAIL_INVOCATION_ID"] = invocation_id
+    return env
+
+
 def run_pytest(
     root: Path,
     timeout: int = DEFAULT_TIMEOUT,
     paths: tuple[str, ...] | list[str] = (),
+    *,
+    evidence_path: Path | None = None,
+    invocation_id: str = "",
+    extra_args: tuple[str, ...] | list[str] = (),
+    env_extra: dict[str, str] | None = None,
+    kind: str = "pytest",
 ) -> RunResult:
     """pytest를 실행한다. 실행 자체가 불가능하면 UNVERIFIED로 남긴다.
 
@@ -161,14 +192,19 @@ def run_pytest(
             str(report_path),
             "-q",
             *paths,
+            *extra_args,
         ]
+        if evidence_path is not None:
+            # 기존 실행에 붙인다. 재실행 없이 같은 실행에서 식별자별 증거를 얻는다.
+            command += ["-p", EVIDENCE_PLUGIN]
+        env = _evidence_env(evidence_path, invocation_id, env_extra)
 
         started = time.monotonic()
         try:
-            proc = run_captured(command, cwd=str(root), timeout=timeout)
+            proc = run_captured(command, cwd=str(root), timeout=timeout, env=env)
         except FileNotFoundError:
             return RunResult(
-                kind="pytest",
+                kind=kind,
                 status=UNVERIFIED,
                 command=command,
                 cwd=str(root),
@@ -176,7 +212,7 @@ def run_pytest(
             )
         except subprocess.TimeoutExpired as exc:
             return RunResult(
-                kind="pytest",
+                kind=kind,
                 status=UNVERIFIED,
                 command=command,
                 cwd=str(root),
@@ -199,7 +235,7 @@ def run_pytest(
         else:
             note = "결과 파일이 생성되지 않았다. pytest가 정상 실행되지 못했다."
         return RunResult(
-            kind="pytest",
+            kind=kind,
             status=UNVERIFIED,
             command=command,
             cwd=str(root),
@@ -218,8 +254,8 @@ def run_pytest(
     # 지어내지 않고 '셀 근거 없음'(None) 으로 둔다.
     collection: list[Failure] = parsed.get("collection_list", [])
     cases = parsed.get("cases")
-    # 실행 수 = testcase 요소 - 수집 오류 항목 - 건너뛴 항목. 건너뛴 테스트는 수집만
-    # 됐지 돌지 않았다. 세면 "실행 확인" 이라는 말이 거짓이 된다.
+    # 실행 확인 수 = testcase 요소 - 수집 오류 항목 - skipped 항목. skipped 는 결과가
+    # 확인되지 않은 항목이다. 세면 "확인" 이라는 말이 거짓이 된다.
     ran: int | None = (
         None
         if cases is None
@@ -230,6 +266,21 @@ def run_pytest(
 
     bad = failed + errors
     status = FAIL if (bad > 0 or proc.returncode not in (0,)) else PASS
+
+    # JUnit 의 테스트가 전부 skipped 다. pytest 는 종료 0 을 주고 실패도 0 이라 위 규칙으로는
+    # PASS 다. 그러나 통과로 확인된 동작이 없다 -- 통과가 아니라 검증 불가다. 이 집계만으로
+    # 본문 실행 여부는 알 수 없다(본문 안 skip·실패한 xfail 도 skipped 로 적힌다). 숫자와
+    # 종료 코드는 실행 사실이므로 그대로 남긴다. 수집 0개(종료 5)는 위에서 이미 FAIL 이고,
+    # 실패·오류가 섞인 경우도 위 규칙이 먼저다.
+    all_skipped_note = ""
+    if status == PASS and cases and ran == 0:
+        status = UNVERIFIED
+        all_skipped_note = (
+            f"JUnit 에 기록된 테스트 {cases}개가 모두 skipped 로 표시되어 통과로 확인된 "
+            "테스트가 없다. 이 집계만으로 본문 실행 여부는 알 수 없다(본문 안 skip·xfail 도 "
+            f"skipped 로 적힌다). pytest 종료 코드 {proc.returncode} 은 실행 사실이지 확인이 "
+            "아니다 -- 통과로 세지 않는다."
+        )
 
     if collection:
         # 수집 오류가 있다. total/errors 는 JUnit 이 센 값 그대로 두고(원본 집계),
@@ -254,7 +305,7 @@ def run_pytest(
         if diag:
             note += f" · pytest 출력: {_truncate(diag, 400)}"
         return RunResult(
-            kind="pytest",
+            kind=kind,
             status=FAIL,
             command=command,
             cwd=str(root),
@@ -275,7 +326,7 @@ def run_pytest(
         )
 
     return RunResult(
-        kind="pytest",
+        kind=kind,
         status=status,
         command=command,
         cwd=str(root),
@@ -290,6 +341,8 @@ def run_pytest(
         duration_sec=round(float(parsed["time"]), 2),
         wall_sec=wall,
         failures=parsed["failure_list"],
+        note=all_skipped_note,
+        reason_code=ALL_SKIPPED if all_skipped_note else "",
         phase="run",
         tests_ran=ran,
     )

@@ -7,7 +7,7 @@ data/junit_collection_error.xml 은 실제 사례에서 나온 파일이다: 루
 
 from pathlib import Path
 
-from claimtrail.runners.base import COLLECTION_ERROR, FAIL, PASS
+from claimtrail.runners.base import ALL_SKIPPED, COLLECTION_ERROR, FAIL, PASS, UNVERIFIED
 from claimtrail.runners.pytest_runner import _parse_junit, run_pytest
 
 DATA = Path(__file__).parent / "data"
@@ -148,3 +148,146 @@ def test_건너뛴_테스트는_실행_수에_세지_않는다(tmp_path: Path):
     assert r.total == 2 and r.skipped == 1 and r.passed == 1
     assert r.phase == "run"
     assert r.tests_ran == 1, "skipped 를 실행으로 셌다"
+
+
+# --- 전부 건너뜀 -------------------------------------------------------------
+
+
+def _write_tests(root: Path, body: str) -> None:
+    import textwrap
+
+    (root / "tests").mkdir(parents=True, exist_ok=True)
+    (root / "tests" / "test_probe.py").write_text(textwrap.dedent(body), encoding="utf-8")
+
+
+def test_전부_건너뛴_결과는_통과가_아니다(tmp_path: Path):
+    """JUnit 의 테스트가 전부 skipped 라 통과로 확인된 것이 없다. pytest 는 종료 0 을 주지만
+    그것은 '실행했다' 는 사실이지 '확인했다' 는 뜻이 아니다. 외부 실측(2026-09-18 C5)에서
+    이 조건이 PASS 로 집계되는 것이 확인됐다."""
+    _write_tests(
+        tmp_path,
+        """
+        import pytest
+
+        pytestmark = pytest.mark.skip(reason="probe: all skipped")
+
+
+        def test_a():
+            assert True
+
+
+        def test_b():
+            assert True
+
+
+        def test_c():
+            assert True
+        """,
+    )
+    r = run_pytest(tmp_path, timeout=120, paths=["tests"])
+    assert r.status == UNVERIFIED, "전부 건너뛴 실행을 통과로 셌다"
+    assert r.reason_code == ALL_SKIPPED
+    assert r.exit_code == 0, "pytest 자체 종료 코드는 실행 사실로 보존한다"
+    assert (r.total, r.passed, r.failed, r.errors, r.skipped) == (3, 0, 0, 0, 3)
+    assert r.tests_ran == 0
+    assert r.phase == "run"
+    assert "skipped" in r.note and "통과로 확인된 테스트가 없다" in r.note
+
+
+def test_일부만_건너뛰면_통과_판정은_그대로다(tmp_path: Path):
+    _write_tests(
+        tmp_path,
+        """
+        import pytest
+
+
+        def test_ok():
+            assert True
+
+
+        @pytest.mark.skip(reason="not now")
+        def test_skipped():
+            assert False
+        """,
+    )
+    r = run_pytest(tmp_path, timeout=120, paths=["tests"])
+    assert r.status == PASS
+    assert r.reason_code == ""
+    assert (r.total, r.passed, r.skipped, r.tests_ran) == (2, 1, 1, 1)
+
+
+def test_실패와_건너뜀이_섞이면_실패_판정을_덮어쓰지_않는다(tmp_path: Path):
+    _write_tests(
+        tmp_path,
+        """
+        import pytest
+
+
+        def test_bad():
+            assert 1 == 2
+
+
+        @pytest.mark.skip(reason="not now")
+        def test_skipped():
+            assert False
+        """,
+    )
+    r = run_pytest(tmp_path, timeout=120, paths=["tests"])
+    assert r.status == FAIL
+    assert r.reason_code == ""
+    assert (r.failed, r.skipped, r.tests_ran) == (1, 1, 1)
+
+
+def test_수집된_테스트가_0개면_실패_판정은_그대로다(tmp_path: Path):
+    """외부 실측 C8. 수집 0 은 pytest 종료 5 이고 이 도구는 FAIL 로 둔다 --
+    전부 건너뜀(수집 1개 이상, 본문 0) 과 같은 상태로 옮기지 않는다."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "__init__.py").write_text("", encoding="utf-8")
+    r = run_pytest(tmp_path, timeout=120, paths=["tests"])
+    assert r.status == FAIL
+    assert r.exit_code == 5
+    assert r.total == 0
+    assert r.reason_code != ALL_SKIPPED
+
+
+def test_본문_안에서_skip_해도_JUnit_은_skipped_라_실행_수에_들지_않는다(tmp_path: Path):
+    """tests_ran == 0 은 '본문에 들어가지 않았다' 가 아니다. 본문이 파일을 쓴 뒤
+    pytest.skip() 을 불러도 JUnit 은 skipped 로 적는다(검토 지적, 2026-09-28)."""
+    _write_tests(
+        tmp_path,
+        """
+        import pathlib
+        import pytest
+
+
+        def test_runs_then_skips():
+            pathlib.Path("body_ran.marker").write_text("ran", encoding="utf-8")
+            pytest.skip("probe: skip after running the body")
+        """,
+    )
+    r = run_pytest(tmp_path, timeout=120, paths=["tests"])
+    assert (tmp_path / "body_ran.marker").is_file(), "본문이 실제로 돌았다"
+    assert (r.total, r.skipped, r.tests_ran) == (1, 1, 0)
+    assert r.status == UNVERIFIED and r.reason_code == ALL_SKIPPED
+    assert "본문이 실행된 테스트가 0개" not in r.note, "본문 미실행을 단정하는 문구다"
+    assert "알 수 없" in r.note
+
+
+def test_실패한_xfail_도_JUnit_은_skipped_라_전부_건너뜀_분기에_든다(tmp_path: Path):
+    """non-strict xfail 이 실패하면 JUnit 은 <skipped type="pytest.xfail"> 로 적는다.
+    그래서 전부 xfail 인 파일도 이 분기로 들어온다 -- 별도 xfail 정책은 없다."""
+    _write_tests(
+        tmp_path,
+        """
+        import pytest
+
+
+        @pytest.mark.xfail(reason="probe: expected failure")
+        def test_expected_failure():
+            assert 1 == 2
+        """,
+    )
+    r = run_pytest(tmp_path, timeout=120, paths=["tests"])
+    assert r.exit_code == 0
+    assert (r.total, r.skipped, r.tests_ran) == (1, 1, 0)
+    assert r.status == UNVERIFIED and r.reason_code == ALL_SKIPPED

@@ -318,3 +318,44 @@ def test_스냅샷_입력에서도_두_형식이_같은_말을_한다(monkeypatc
     data = build_json(Path("fixture-root"), dets, res)
     assert _kinds_in_markdown(md) == set(data["not_verified"])
     assert set(data["not_verified"]) == {"type-check", "npm test"}
+
+
+# --- 전부 건너뜀: 숫자·실행 사실은 남기고 판정만 검증 불가 -------------------------
+
+
+def _all_skipped() -> RunResult:
+    return RunResult(
+        kind="pytest", status=UNVERIFIED, command=["python", "-m", "pytest", "-q", "tests"],
+        exit_code=0, total=3, passed=0, failed=0, errors=0, skipped=3, duration_sec=0.05,
+        wall_sec=1.2, phase="run", tests_ran=0, reason_code="all_skipped",
+        note="JUnit 에 기록된 테스트 3개가 모두 skipped 로 표시되어 통과로 확인된 테스트가 없다.",
+    )
+
+
+def test_전부_건너뛴_pytest_는_표에_숫자와_종료_코드를_남긴다(tmp_path: Path):
+    md = build_markdown(tmp_path, [_det()], [_all_skipped()])
+    assert "## 판정 — 검증 불가" in md
+    assert "| pytest | 검증 불가 | 3개 중 0 통과, 3 건너뜀 | 0.05s | 1.2s |" in md
+    assert "종료 코드: `0`" in md
+    assert "통과로 확인된 테스트가 없다" in md
+    assert "실행은 됐지만 확인한 것이 없는 검사가 있다" in md
+    assert "검증을 실행하지 못했다" not in md, "실행된 검사를 실행하지 못했다고 적었다"
+
+
+def test_전부_건너뛴_pytest_는_확인하지_못한_것에도_든다(tmp_path: Path):
+    data = build_json(tmp_path, [_det()], [_all_skipped()])
+    assert data["verdict"] == UNVERIFIED
+    assert "pytest" in data["not_verified"]
+    md = build_markdown(tmp_path, [_det()], [_all_skipped()])
+    assert _kinds_in_markdown(md) == set(data["not_verified"]) == {"pytest"}
+
+
+def test_숫자가_없는_검증_불가는_표에_들어가지_않는다(tmp_path: Path):
+    """타임아웃·미설치처럼 센 것이 없는 결과는 예전처럼 표 밖이다. 모든 검증 불가를
+    '실행한 검사' 로 승격하지 않는다."""
+    r = RunResult(kind="pytest", status=UNVERIFIED, command=["python", "-m", "pytest"],
+                  note="이 환경에 pytest가 설치되어 있지 않다.")
+    md = build_markdown(tmp_path, [_det()], [r])
+    assert "실제로 실행된 검증이 없다." in md
+    assert "| pytest |" not in md
+    assert "검증을 실행하지 못했다" in md, "실행하지 못한 경우의 문구는 그대로다"

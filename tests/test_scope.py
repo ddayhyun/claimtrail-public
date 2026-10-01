@@ -305,3 +305,82 @@ def test_CLI_는_잘못된_설정이면_추측하지_않고_2_로_멈춘다(tmp_
         cli.main(["run", str(proj), "--config", str(cfg)])
     assert exc.value.code == 2
     assert "모르는 검사" in capsys.readouterr().err
+
+
+# --- 전부 건너뜀 (외부 실측 2026-09-18 C5) ----------------------------------------
+
+
+def test_필수가_아닌_검사가_검증_불가여도_필수가_모두_통과하면_통과다():
+    results = [_r("pytest", UNVERIFIED), _r("lint", PASS)]
+    assert overall_verdict(results, ["lint"]) == PASS
+
+
+def _all_skipped_project(root: Path) -> Path:
+    import textwrap
+
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_probe.py").write_text(
+        textwrap.dedent(
+            """
+            import pytest
+
+            pytestmark = pytest.mark.skip(reason="probe: all skipped")
+
+
+            def test_a():
+                assert True
+
+
+            def test_b():
+                assert True
+
+
+            def test_c():
+                assert True
+            """
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_CLI_는_필수_pytest_가_전부_건너뛰면_종료코드_2_다(tmp_path: Path):
+    """숫자(3개 중 0 통과, 3 건너뜀)와 pytest 종료 코드 0 은 그대로 남기고,
+    판정만 검증 불가로 둔다. 실행한 사실과 확인한 사실은 다르다."""
+    proj = _all_skipped_project(tmp_path / "proj")
+    cfg = tmp_path / "outside.json"
+    cfg.write_text(json.dumps({"required": ["pytest"], "pytest": {"paths": ["tests"]}}))
+    out_json = tmp_path / "report.json"
+    out_md = tmp_path / "report.md"
+
+    code = cli.main(
+        ["run", str(proj), "--config", str(cfg), "--format", "json", "-o", str(out_json)]
+    )
+    assert code == 2
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    assert data["verdict"] == UNVERIFIED
+    assert data["scope"]["required_status"] == {"pytest": UNVERIFIED}
+    py = next(r for r in data["results"] if r["kind"] == "pytest")
+    assert (py["total"], py["passed"], py["skipped"], py["tests_ran"]) == (3, 0, 3, 0)
+    assert py["exit_code"] == 0
+    assert py["reason_code"] == "all_skipped"
+    assert "pytest" in data["not_verified"]
+
+    assert cli.main(["run", str(proj), "--config", str(cfg), "-o", str(out_md)]) == 2
+    md = out_md.read_text(encoding="utf-8")
+    assert "## 판정 — 검증 불가" in md
+    assert "필수 검사: pytest 검증 불가" in md
+    assert "| pytest | 검증 불가 | 3개 중 0 통과, 3 건너뜀 |" in md
+    assert "종료 코드: `0`" in md
+
+
+def test_CLI_는_설정_없이도_전부_건너뛰면_종료코드_2_다(tmp_path: Path):
+    """required 가 없어도 기존 집계 규칙(결과 중 검증 불가가 있으면 전체 검증 불가)이
+    그대로 적용된다."""
+    proj = _all_skipped_project(tmp_path / "proj")
+    out = tmp_path / "report.json"
+    code = cli.main(["run", str(proj), "--format", "json", "-o", str(out)])
+    assert code == 2
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == UNVERIFIED
+    assert data["scope"] is None

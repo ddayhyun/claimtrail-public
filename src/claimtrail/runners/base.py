@@ -23,6 +23,16 @@ RUN_TIMEOUT = "run_timeout"
 # pytest 가 테스트를 돌리기 전, 수집 단계에서 죽었다. 결과 파일은 나오지만
 # 거기 적힌 항목은 테스트가 아니라 '어느 파일을 import 하지 못했다' 다.
 COLLECTION_ERROR = "collection_error"
+# JUnit 에 기록된 테스트가 모두 skipped 로 표시되어 통과로 확인된 테스트가 없다. pytest
+# 종료 코드는 0 이지만 확인한 것이 없으므로 통과가 아니라 검증 불가다. skipped 가 본문
+# 미실행을 뜻하지는 않는다 -- 본문 안 pytest.skip()·실패한 xfail 도 skipped 로 적힌다.
+ALL_SKIPPED = "all_skipped"
+
+# 판정 정책 개정 식별자. 같은 파일·같은 도구 버전이라도 판정 규칙이 바뀌면 답이 달라질
+# 수 있다. 훅은 이 값을 캐시 키(policy_hash)에 넣어 옛 규칙으로 얻은 PASS 를 재사용하지
+# 않는다. 판정 규칙을 바꿀 때마다 이 문자열을 바꾼다 -- 버전 번호는 배포 절차의 것이라
+# 여기에 얹지 않는다.
+VERDICT_POLICY = "2026-09-28 pytest all-skipped is unverified"
 
 
 @dataclass
@@ -63,8 +73,9 @@ class RunResult:
     # pytest 전용. "collection" 이면 위 total/errors 는 수집 오류 항목을 센 값이지
     # 테스트를 돌린 결과가 아니다. 비어 있으면 그런 구분이 필요 없는 러너다.
     phase: str = ""
-    # pytest 전용. JUnit testcase 개수에서 수집 오류 항목과 건너뛴(skipped) 항목을 뺀
-    # 값 -- 실제로 돌았다고 확인되는 테스트 수. None 은 '셀 근거가 없다' 이지 0 이 아니다.
+    # pytest 전용. JUnit testcase 개수에서 수집 오류 항목과 skipped 표시 항목을 뺀 값 --
+    # 통과·실패로 결과가 확인된 테스트 수. skipped 는 본문 미실행을 뜻하지 않는다(본문 안
+    # skip·xfail 도 skipped 로 기록된다). None 은 '셀 근거가 없다' 이지 0 이 아니다.
     tests_ran: int | None = None
 
     @property

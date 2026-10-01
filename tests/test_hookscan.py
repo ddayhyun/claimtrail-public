@@ -888,3 +888,13 @@ def test_git이_아예_없는_곳은_여전히_walk로_간다(tmp_path: Path, mo
     listing = list_files(plain, DEFAULT)
     assert listing.source == "walk"
     assert "src/a.py" in listing.names
+
+
+def test_판정_정책_개정은_policy_hash_를_바꾼다(monkeypatch):
+    """전부 건너뜀 → 검증 불가 같은 판정 정책 변경은 감시 파일이 같아도 답을 바꾼다.
+    policy_hash 에 넣어 옛 PASS 캐시를 무효화한다."""
+    import claimtrail.runners.base as runner_base
+
+    a = parse_watch(None).policy_hash()
+    monkeypatch.setattr(runner_base, "VERDICT_POLICY", "other-policy")
+    assert parse_watch(None).policy_hash() != a
