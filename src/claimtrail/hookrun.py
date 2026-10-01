@@ -489,6 +489,10 @@ class _Runner:
         # 이번 작업(상태 폴더·세션·프롬프트)의 도출 목록. 없으면 미수행이고, 그것은
         # 기존 검사 판정을 바꾸지 않는다 -- 다만 증빙에 별개의 축으로 남는다.
         # 활성화 표식은 미수행의 뜻만 가른다(기대했는데 안 함 / 애초에 안 켬).
+        # 도출 기록의 policy_hash 는 감시 정책만 담는다(검사 범위 설정 제외). 제출하는 CLI 는
+        # 훅의 설정 -- 특히 CLAIMTRAIL_CONFIG 로 준 외부 파일 -- 을 볼 수 없으므로, 설정을
+        # 넣으면 설정이 있는 프로젝트의 모든 제출이 stale 이 된다. 설정 범위는 연결 단계에서
+        # 실제 결과(미수집 등)로 드러나고, 캐시 판단에는 위의 policy_hash(설정 포함)를 쓴다.
         derive = self._timed(
             "derive",
             load_derive,
@@ -496,7 +500,7 @@ class _Runner:
             self.stop.session_id,
             self.stop.prompt_id,
             before.digest,
-            policy_hash,
+            policy.policy_hash(),
             active=derive_enabled(self.state_dir),
         )
         self.log("derive", derive.status, derive.detail)
@@ -642,7 +646,12 @@ class _Runner:
         # 필수가 아닌 검사의 검증 불가는 판정을 막지 않는다(실패는 여전히 실패).
         required = config_sel.config.required if config_sel.config is not None else ()
         verdict = overall_verdict(results, required)
-        derive = self._link_derive(derive, root, evidence_dir, existing_inv)
+        # 설정 오류는 모든 검사 중단이다 -- 자동 도출의 생성 검사도 돌리지 않고, 항목은
+        # 연결을 시도하지 않은 채(unlinked) 남긴다. 설정을 고친 다음 실행에서 연결한다.
+        if config_sel.ok:
+            derive = self._link_derive(derive, root, evidence_dir, existing_inv)
+        else:
+            self.log("generated", "skipped", "설정 오류로 생성 검사·연결을 건너뛰었다")
         # 연결까지 끝난 뒤의 되돌림 사유. 판정(verdict)과는 별개의 축이다.
         notice = derive_notice(derive)
         # note 를 파싱하지 않는다. 사람이 읽는 문구를 판단 근거로 쓰면

@@ -1776,3 +1776,82 @@ def test_캐시_복원_경로도_설정_선택을_다시_확인한다(proj: Path
     # 다음 호출은 바뀐 설정으로 처음부터 실행한다(정책 해시가 달라져 캐시 없음)
     nxt = run(stop_json(proj), env2)
     assert nxt.action == "run" and nxt.reason_code == "ok"
+
+
+def test_설정_오류면_생성_검사도_실행하지_않는다(proj: Path, env: dict[str, str], monkeypatch):
+    """설정 오류 = 모든 검사 중단. 기존 검사뿐 아니라 자동 도출의 생성 검사도 돌리지 않는다."""
+    from claimtrail.derive import enable, submit
+    from claimtrail.hookscan import parse_watch
+
+    enable(sd_of(proj, env))
+    gen = proj.parent / "scratch" / "test_derived.py"
+    gen.parent.mkdir(parents=True, exist_ok=True)
+    gen.write_text("def test_generated():\n    assert True\n", encoding="utf-8")
+    doc = {
+        "schema": 1,
+        "status": "performed",
+        "request": "r",
+        "items": [
+            {
+                "id": "G1",
+                "kind": "requirement",
+                "behavior": "b",
+                "why": "w",
+                "basis": "README.md:1",
+                "how": {"generated": "test_derived.py::test_generated"},
+            }
+        ],
+    }
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", doc, [gen])
+    execute_calls: list[int] = []
+    generated_calls: list[int] = []
+    base = fake_execute(PASS)
+
+    def counting_execute(root, timeout, deadline=None, detections=None, **kw):
+        execute_calls.append(1)
+        return base(root, timeout, deadline, detections, **kw)
+
+    def counting_generated(*args, **kwargs):
+        generated_calls.append(1)
+        return RunResult(kind="derived-tests", status=PASS, command=["pytest"], exit_code=0)
+
+    monkeypatch.setattr(hookrun, "execute", counting_execute)
+    monkeypatch.setattr(hookrun, "run_generated", counting_generated)
+    # 설정은 루트 밖에 둔다 -- 루트에 쓰면 입력 지문이 바뀌어 도출이 stale 이 되고 재현이 안 된다
+    broken = proj.parent / "broken.json"
+    broken.write_text("{broken", encoding="utf-8")
+    out = run(stop_json(proj, prompt_id="p-1"), dict(env, CLAIMTRAIL_CONFIG=str(broken)))
+    assert out.exit_code == 2 and out.reason_code.startswith("bad_config:parse")
+    assert execute_calls == [], "기존 검사 러너 호출 0회"
+    assert generated_calls == [], "생성 검사 러너 호출도 0회"
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["derive"]["status"] == "performed"
+    assert ev["derive"]["items"][0]["link_status"] == "unlinked", "연결을 시도하지 않았다"
+
+
+def test_검사_범위_설정이_있어도_도출_제출은_stale_이_아니다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    """도출의 policy_hash 는 감시 정책만 담는다. CLI 의 submit 은 훅의 설정(특히
+    CLAIMTRAIL_CONFIG 로 준 외부 파일)을 볼 수 없으므로, 설정을 넣으면 설정이 있는
+    프로젝트의 모든 제출이 '감시 정책이 다르다' 로 stale 이 된다."""
+    from claimtrail.derive import enable, submit
+    from claimtrail.hookscan import parse_watch
+
+    enable(sd_of(proj, env))
+    _write_config(proj, {"pytest": {"paths": ["tests"]}})  # 제출 전에 써서 입력 지문에 포함
+    doc = {"schema": 1, "status": "not_applicable", "reason": "설명만 한 대화"}
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", doc)
+    fake, _seen = _capture_execute()
+    monkeypatch.setattr(hookrun, "execute", fake)
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.exit_code == 0 and out.reason_code == "ok"
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["derive"]["status"] == "not_applicable", ev["derive"]
+    # 외부 설정(CLAIMTRAIL_CONFIG)도 같다 -- CLI 쪽 환경에는 그 변수가 없다
+    ext = proj.parent / "ext.json"
+    ext.write_text(json.dumps({"pytest": {"paths": ["tests"]}}), encoding="utf-8")
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-2", doc)
+    out2 = run(stop_json(proj, prompt_id="p-2"), dict(env, CLAIMTRAIL_CONFIG=str(ext)))
+    assert out2.exit_code == 0 and out2.reason_code == "ok"
+    assert _evidence(proj, env, out2.run_id)["derive"]["status"] == "not_applicable"
