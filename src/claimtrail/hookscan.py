@@ -231,26 +231,28 @@ class WatchPolicy:
             return "replace"
         return "add" if self.extra else "default"
 
-    def policy_hash(self) -> str:
-        payload = json.dumps(
-            {
-                "replace": sorted(self.replace),
-                "extra": sorted(self.extra),
-                "include_docs": self.include_docs,
-                "include_ignored": sorted(self.include_ignored),
-                "default_ignored": list(DEFAULT_IGNORED_INPUTS),
-                "force_include": sorted(FORCE_INCLUDE),
-                "doc_suffixes": sorted(DOC_SUFFIXES),
-                "doc_dirs": sorted(DOC_DIRS),
-                "root_doc_prefixes": sorted(ROOT_DOC_PREFIXES),
-                "skip_dirs": sorted(SKIP_DIRS),
-                # 감시 범위가 같아도 판정 규칙이 바뀌면 같은 파일에 다른 답이 나온다.
-                # 옛 규칙의 PASS 를 재사용하지 않도록 정책 식별자를 함께 해시한다.
-                "verdict_policy": _runner_base.VERDICT_POLICY,
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        )
+    def policy_hash(self, config_payload: dict | None = None) -> str:
+        """감시 정책의 식별자. 검사 범위 설정(claimtrail.json)이 **있을 때만** 그 내용을
+        함께 해시한다 -- 설정이 없는 프로젝트의 해시는 설정 기능이 생기기 전과 같아야
+        캐시가 그대로 유지된다(테스트가 값을 고정한다)."""
+        fields: dict[str, object] = {
+            "replace": sorted(self.replace),
+            "extra": sorted(self.extra),
+            "include_docs": self.include_docs,
+            "include_ignored": sorted(self.include_ignored),
+            "default_ignored": list(DEFAULT_IGNORED_INPUTS),
+            "force_include": sorted(FORCE_INCLUDE),
+            "doc_suffixes": sorted(DOC_SUFFIXES),
+            "doc_dirs": sorted(DOC_DIRS),
+            "root_doc_prefixes": sorted(ROOT_DOC_PREFIXES),
+            "skip_dirs": sorted(SKIP_DIRS),
+            # 감시 범위가 같아도 판정 규칙이 바뀌면 같은 파일에 다른 답이 나온다.
+            # 옛 규칙의 PASS 를 재사용하지 않도록 정책 식별자를 함께 해시한다.
+            "verdict_policy": _runner_base.VERDICT_POLICY,
+        }
+        if config_payload is not None:
+            fields["config"] = config_payload
+        payload = json.dumps(fields, sort_keys=True, ensure_ascii=False)
         return _sha256(payload.encode("utf-8"))[:16]
 
 

@@ -78,7 +78,7 @@ def test_Markdown_은_설정_범위의_통과임을_밝힌다(tmp_path: Path):
     md = build_markdown(tmp_path, _dets(), [_r("pytest", PASS), _r("lint", PASS)], cfg)
     assert "## 판정 — 통과" in md
     assert "검증 범위 설정" in md
-    assert "설정 범위의 통과" in md
+    assert "통과 — 설정된 검사 범위에 한함" in md
     assert "pytest 범위: `tests`" in md
 
 

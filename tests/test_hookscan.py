@@ -418,6 +418,22 @@ def test_감시_정책이_바뀌면_policy_hash도_바뀐다():
     assert parse_watch('["src"]').policy_hash() == b
 
 
+def test_설정이_없으면_policy_hash_는_2e_이전_값과_같다():
+    """2e(훅의 검사 범위 설정) 전에 잰 값. 설정 없는 프로젝트의 캐시가 그대로여야 한다.
+    이 값이 바뀌면 모든 프로젝트의 PASS 캐시가 한 번 무효가 된다 -- 의도한 정책 변경일
+    때만(VERDICT_POLICY 변경 등) 이 상수를 함께 바꾼다."""
+    assert parse_watch(None).policy_hash() == "5de8436ac6adc57a"
+    assert parse_watch(None).policy_hash(None) == "5de8436ac6adc57a"
+
+
+def test_설정_페이로드가_있으면_policy_hash_가_달라지고_내용으로_구분된다():
+    p = parse_watch(None)
+    a = p.policy_hash({"source": "root", "sha256": "x" * 64})
+    b = p.policy_hash({"source": "root", "sha256": "y" * 64})
+    assert a != p.policy_hash() and a != b
+    assert a == p.policy_hash({"source": "root", "sha256": "x" * 64})
+
+
 # ============================================================================
 # 5. 경로·파일 안전성
 # ============================================================================

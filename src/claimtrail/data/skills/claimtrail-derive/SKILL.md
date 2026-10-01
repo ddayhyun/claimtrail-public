@@ -26,6 +26,9 @@ description: Claimtrail 자동 도출이 켜진 프로젝트에서 코드 변경
 - 항목마다: `behavior`(확인할 동작), `why`(필요한 이유), `basis`(근거: `파일:줄` 또는 README 문장), `how`.
 - `how` 는 셋 중 하나:
   - `{"existing": ["tests/test_x.py::test_name", ...]}` — 기존 테스트가 그 기대 동작을 실제로 단언할 때만.
+    `existing` 은 이번 훅 검사 범위(`claimtrail.json` 의 `pytest.paths`)에 포함된 테스트를 연결한다.
+    범위 밖 테스트는 미수집으로 남으며, 범위 확대 또는 별도 검증 필요성을 보고한다.
+    생성 검사는 대상 fixture 없이 독립 실행할 수 있는 경우에 사용한다.
   - `{"generated": "test_derived_<작업>.py::test_name"}` — 부족한 검사를 새로 썼을 때.
   - `{"none": "<실행하지 않는 이유>"}` — 질문·fixture 필요 등.
 - `kind`:
