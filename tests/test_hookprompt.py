@@ -108,3 +108,26 @@ def test_설치본이_없으면_문맥의_제출_명령은_m_claimtrail_형태�
     text = hookprompt.build_context(_payload(proj), env)
     assert "-m claimtrail derive submit" in text
     assert "claimtrail derive submit" not in text.replace("-m claimtrail derive submit", "")
+
+
+def test_공백이_든_프로젝트_경로도_제출_명령에서_인자_하나다(
+    tmp_path: Path, env: dict[str, str], monkeypatch
+):
+    import shlex
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    root = tmp_path / "project with space"
+    root.mkdir()
+    (root / "pyproject.toml").write_text('[project]\nname = "p"\n', encoding="utf-8")
+    enable(state_dir_for(root, Path(env["CLAIMTRAIL_STATE_DIR"])))
+    text = hookprompt.build_context(_payload(root), env)
+    submit_lines = [ln for ln in text.splitlines() if "derive submit" in ln]
+    assert submit_lines
+    for line in submit_lines:
+        tokens = shlex.split(line.split(": ", 1)[1])
+        i = tokens.index("submit")
+        assert tokens[i + 1] == root.resolve().as_posix(), "경로가 셸 인자 하나여야 한다"
+        assert tokens[i + 2] == "--session-id"

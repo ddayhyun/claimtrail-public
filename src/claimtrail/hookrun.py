@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -751,7 +752,7 @@ class _Runner:
         """세션에 보내는 되돌림 문구. 무엇이 비었는지, 판정은 그대로인지, 어떻게 제출하는지."""
         cli = cli_invocation(self.env)
         ids = f"--session-id {self.stop.session_id} --prompt-id {self.stop.prompt_id}"
-        target = root.as_posix()
+        target = shlex.quote(root.as_posix())  # 공백 경로도 셸 인자 하나로
         assert self.state_dir is not None
         evidence = (self.state_dir / "evidence.md").as_posix()
         return (

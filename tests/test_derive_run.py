@@ -307,3 +307,29 @@ def test_서로_다른_생성_파일의_같은_이름_테스트가_각각_연결
         gen,
     )
     assert [x["link_status"] for x in linked] == [LINK_FAILED, LINK_PASSED]
+
+
+# --- 단계 순서와 무관하게 실패가 먼저다 (PR #4 검토 재현) ----------------------
+
+
+def test_call_skipped_라도_teardown_실패면_실패다():
+    """본문이 skipped 여도 정리 단계 실패는 실패다. 단계 순서대로 보다 멈추면 가려진다."""
+    ev = _evidence(
+        {
+            "tests/t.py::test_a": {
+                "setup": _phase("passed"),
+                "call": _phase("skipped", reason="not now"),
+                "teardown": _phase("failed", cause="RuntimeError: cleanup"),
+            }
+        }
+    )
+    linked = link_items([_item("D1", {"existing": ["tests/t.py::test_a"]})], ev, None, None)
+    assert linked[0]["link_status"] == LINK_FAILED
+    assert "teardown" in linked[0]["link_detail"] and "cleanup" in linked[0]["link_detail"]
+
+
+def test_setup_skipped_면_나머지_단계_기록이_없어도_skipped_다():
+    ev = _evidence({"tests/t.py::test_a": {"setup": _phase("skipped", reason="no db")}})
+    linked = link_items([_item("D1", {"existing": ["tests/t.py::test_a"]})], ev, None, None)
+    assert linked[0]["link_status"] == LINK_SKIPPED
+    assert "no db" in linked[0]["link_detail"]

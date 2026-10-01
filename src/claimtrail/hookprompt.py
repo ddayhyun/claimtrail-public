@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -55,7 +56,8 @@ def build_context(raw: str, env: Mapping[str, str]) -> str:
 
     session_id = str(data.get("session_id") or "")
     prompt_id = str(data.get("prompt_id") or "")
-    root = root_res.root.as_posix()
+    # 셸 인자 하나로 인용한다. 공백이 든 경로를 그대로 넣으면 명령이 두 인자로 갈라진다.
+    root = shlex.quote(root_res.root.as_posix())
     lines = [
         "[claimtrail] 이 프로젝트는 자동 도출이 켜져 있다. "
         "코드 변경·검사 요청이면 답을 끝내기 전에",

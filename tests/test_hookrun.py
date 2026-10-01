@@ -1537,3 +1537,29 @@ def test_새_요청의_첫_호출은_이전_요청의_억제를_이어받지_않
     assert second.exit_code == 2 and second.reason_code == "derive_notice"
     assert "--prompt-id p-2" in second.detail
     assert run(stop_json(proj, prompt_id="p-2", stop_hook_active=True), env).exit_code == 0
+
+
+def test_되돌림_문구의_제출_명령은_공백_경로도_인자_하나로_인용한다(
+    tmp_path: Path, env: dict[str, str], monkeypatch
+):
+    import shlex
+
+    from claimtrail.derive import enable
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    root = tmp_path / "proj with space"
+    (root / "src").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[project]\nname="p"\n', encoding="utf-8")
+    (root / "src" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    enable(sd_of(root, env))
+    out = run(stop_json(root, prompt_id="p-1"), env)
+    assert out.exit_code == 2 and out.reason_code == "derive_notice"
+    command = out.detail.split("제출·재제출: ", 1)[1].split(";", 1)[0]
+    tokens = shlex.split(command)
+    i = tokens.index("submit")
+    assert tokens[i + 1] == root.resolve().as_posix(), "경로가 셸 인자 하나여야 한다"
+    assert tokens[i + 2] == "--session-id"

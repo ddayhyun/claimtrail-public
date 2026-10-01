@@ -4,9 +4,10 @@
 불완전하면 확인 불가로 남기고, 세션의 설명이나 개수 비교로 채우지 않는다. 연결은
 가림 전 원본 식별자로 한다 -- 가림이 식별자를 바꾸면 연결이 어긋난다.
 
-생성 검사는 첫 구현에서 독립 단위 검사로 제한한다. 대상 루트를 rootdir·import 경로로
-쓰되 대상 conftest 의 fixture 는 보이지 않는다(생성 파일이 대상 밖에 있으므로). fixture 가
-필요한 항목은 `needs_fixture` 로 실행하지 않고 남긴다.
+생성 검사는 첫 구현에서 독립 단위 검사로 제한한다. rootdir 는 생성 파일 폴더이고, 대상
+루트는 import 경로(PYTHONPATH)와 설정 파일(-c)로만 쓴다. 대상 conftest 의 fixture 는
+보이지 않는다(생성 파일이 대상 밖에 있으므로). fixture 가 필요한 항목은 `needs_fixture` 로
+실행하지 않고 남긴다.
 """
 
 from __future__ import annotations
@@ -94,13 +95,14 @@ def _nodeid_status(nodeid: str, evidence: dict | None) -> tuple[str, str]:
         if nodeid in (evidence.get("collected") or []):
             return LINK_INCOMPLETE, "수집됐지만 결과가 없음(중단·미완료)"
         return LINK_NOT_COLLECTED, "이번 실행의 수집 목록에 없음"
-    for phase in ("setup", "call", "teardown"):
-        p = report.get(phase)
-        if not p:
-            continue
-        if p.get("outcome") == "failed":
+    # 실패가 먼저다. 단계 순서대로 보다가 본문 skipped 에서 멈추면 정리(teardown) 실패가
+    # 가려진다 -- PR #4 검토에서 실측된 결함. 세 단계를 다 본 뒤에 skipped 를 판정한다.
+    phases = [(ph, report.get(ph)) for ph in ("setup", "call", "teardown")]
+    for phase, p in phases:
+        if p and p.get("outcome") == "failed":
             return LINK_FAILED, f"{phase} 실패: {p.get('cause', '')}".rstrip(": ")
-        if p.get("outcome") == "skipped":
+    for phase, p in phases:
+        if p and p.get("outcome") == "skipped":
             tag = "xfail" if p.get("wasxfail") else "skipped"
             return LINK_SKIPPED, f"{phase} {tag}: {p.get('reason', '')}".rstrip(": ")
     # 통과는 준비·본문·정리 세 단계가 모두 기록되고 통과했을 때만이다. call 만 통과한 채
@@ -245,7 +247,8 @@ def run_generated(
     timeout: int,
     invocation_id: str,
 ) -> RunResult:
-    """생성 검사를 대상 밖 폴더에서 따로 실행한다. 대상 루트가 rootdir·import 경로다."""
+    """생성 검사를 대상 밖 폴더에서 따로 실행한다. rootdir 는 생성 폴더, 대상 루트는
+    import 경로(PYTHONPATH)와 설정 파일(-c)이다."""
     files = sorted(Path(generated_dir).glob("test_*.py")) if Path(generated_dir).is_dir() else []
     if not files:
         return RunResult(

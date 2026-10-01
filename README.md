@@ -538,8 +538,9 @@ claimtrail derive submit <대상> --session-id <id> --prompt-id <id> --not-appli
 
 **항목별 실행 증거.** 훅은 기존 pytest 실행에 증거 플러그인(`-p claimtrail.evidence`, 환경변수
 `CLAIMTRAIL_EVIDENCE_PATH` 가 있을 때만 동작)을 붙여 **재실행 없이** 식별자별 수집·선택 제외·
-setup/call/teardown 결과를 남기고, 생성 검사는 **대상 밖 폴더에서 따로** 실행합니다(대상 루트가
-rootdir·import 경로, `--import-mode=importlib`; 대상 `conftest.py` 의 fixture 는 보이지 않으므로
+setup/call/teardown 결과를 남기고, 생성 검사는 **대상 밖 폴더에서 따로** 실행합니다(rootdir 는
+생성 파일 폴더, 대상 루트는 import 경로와 설정 파일로만 사용, `--import-mode=importlib`; 대상
+`conftest.py` 의 fixture 는 보이지 않으므로
 fixture 가 필요한 항목은 `needs_fixture` 로 실행하지 않고 남깁니다). 두 실행은 실행 ID 가 다릅니다.
 항목 상태는 증거 파일에서만 나옵니다: `passed`(통과) · `failed`(실패, teardown 실패 포함) ·
 `skipped`(본문 안 skip·xfail 포함) · `deselected`(선택 제외) · `not_collected`(미수집) ·
@@ -577,7 +578,7 @@ claimtrail derive disable <대상>            # 훅 항목과 표식만 뺀다
   손대지 않고, 바꾸기 전에 `settings.json.claimtrail-backup-<시각>` 을 남깁니다. 같은 항목이 이미
   있으면 늘리지 않고, 파일을 읽지 못하면(깨진 JSON) 아무것도 쓰지 않습니다.
 - **활성화 표식.** 훅 상태 폴더(`~/.claude/claimtrail/<프로젝트명>-<해시>/derive.enabled`)에 둡니다.
-  저장소 안에는 아무것도 만들지 않으므로 커밋되거나 다른 개발자에게 번지지 않습니다.
+  표식은 저장소 안에 두지 않으므로 커밋되거나 다른 개발자에게 번지지 않습니다.
 - **스킬 복사.** `claimtrail-derive` 스킬을 `~/.claude/skills/`(또는 `--skills-dir`)에 둡니다.
   도출 절차의 본문은 이 스킬에 있고, 훅이 넣는 문맥은 그것을 가리키기만 합니다.
 
@@ -623,7 +624,9 @@ claimtrail derive disable <대상>            # 훅 항목과 표식만 뺀다
   없는지 `.claude/worktrees/*/.claude/` 와 `git worktree list` 의 각 경로를
   확인하십시오.
 - **상태 폴더.** `~/.claude/claimtrail/<프로젝트명>-<해시>/` 는 훅을 떼도 남습니다.
-  증빙과 로그가 필요 없으면 폴더째 지워도 됩니다. Claimtrail 은 대상 저장소 안에
-  아무것도 만들지 않으므로 저장소 쪽에는 지울 것이 없습니다.
+  증빙과 로그가 필요 없으면 폴더째 지워도 됩니다. 훅은 실행 중 대상 저장소 안에
+  아무것도 쓰지 않습니다. 저장소 쪽에 남는 것은 `claimtrail derive enable` 이 만든
+  `.claude/settings.json` 의 항목과, 설치본에서 걸었다면 `.claude/claimtrail-hook.sh`
+  사본뿐입니다.
 - **다시 걸기.** 같은 설정 항목을 되돌리면 됩니다. 상태 폴더가 남아 있어도 새
   세션의 첫 Stop 은 다시 검증하므로 옛 PASS 가 재사용되지 않습니다.
