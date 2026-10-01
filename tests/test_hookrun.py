@@ -1563,3 +1563,295 @@ def test_되돌림_문구의_제출_명령은_공백_경로도_인자_하나로_
     i = tokens.index("submit")
     assert tokens[i + 1] == root.resolve().as_posix(), "경로가 셸 인자 하나여야 한다"
     assert tokens[i + 2] == "--session-id"
+
+
+# --- 검사 범위 설정 (2e-1) --------------------------------------------------------
+
+
+def _capture_execute(verdict: str = PASS, results: list[RunResult] | None = None):
+    """execute 의 가짜. 훅이 넘긴 config·detections 를 기록한다."""
+    seen: dict = {}
+
+    def _run(root, timeout, deadline=None, detections=None, **kwargs):
+        seen["config"] = kwargs.get("config")
+        seen["detections"] = detections
+        res = results or [RunResult(kind="pytest", status=verdict, command=["pytest"], exit_code=0)]
+        dets = [Detection(kind=r.kind, found=True, signals=["s"]) for r in res]
+        return dets, res
+
+    return _run, seen
+
+
+def _write_config(root: Path, data: object) -> None:
+    text = data if isinstance(data, str) else json.dumps(data)
+    (root / "claimtrail.json").write_text(text, encoding="utf-8")
+
+
+def test_루트_설정이_있으면_훅이_같은_설정으로_탐지하고_실행한다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    (proj / "pyproject.toml").write_text(
+        '[project]\nname="p"\n\n[tool.ruff]\nline-length = 100\n', encoding="utf-8"
+    )
+    _write_config(proj, {"pytest": {"paths": ["tests/fast"]}, "format": {"tool": "ruff"}})
+    fake, seen = _capture_execute()
+    monkeypatch.setattr(hookrun, "execute", fake)
+    out = run(stop_json(proj), env)
+    assert out.exit_code == 0 and out.reason_code == "ok"
+    assert seen["config"] is not None and seen["config"].pytest_paths == ("tests/fast",)
+    assert any(d.kind == "format" and d.found for d in seen["detections"]), (
+        "format.tool 을 켜면 훅의 탐지 목록에 format 러너가 붙는다"
+    )
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["scope"] is not None and ev["scope"]["pytest_paths"] == ["tests/fast"]
+    assert ev["config"]["source"] == "root" and ev["config"]["error_kind"] == ""
+    assert "pytest 범위" in _evidence_md(proj, env, out.run_id)
+
+
+def test_필수_검사가_탐지되지_않으면_검증_불가다(proj: Path, env: dict[str, str], monkeypatch):
+    _write_config(proj, {"required": ["npm test"]})
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))  # pytest 만 돌았다
+    out = run(stop_json(proj), env)
+    assert out.exit_code == 2
+    assert _evidence(proj, env, out.run_id)["verdict"] == UNVERIFIED
+    assert "미실행" in _evidence_md(proj, env, out.run_id)
+
+
+def test_비필수_검사의_검증_불가는_판정을_막지_않지만_실패는_실패다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    unverified = [
+        RunResult(kind="pytest", status=PASS, command=["pytest"], exit_code=0),
+        RunResult(
+            kind="type-check", status=UNVERIFIED, command=["mypy"], exit_code=0, note="mypy 없음"
+        ),
+    ]
+    fake, _ = _capture_execute(results=unverified)
+    monkeypatch.setattr(hookrun, "execute", fake)
+    # 설정 없음: 비필수라는 개념이 없어 검증 불가(기존 규칙)
+    out0 = run(stop_json(proj, prompt_id="p0"), env)
+    assert out0.exit_code == 2 and _evidence(proj, env, out0.run_id)["verdict"] == UNVERIFIED
+    # required 에 pytest 만: type-check 는 여전히 실행(기록)되지만 판정을 막지 않는다
+    _write_config(proj, {"required": ["pytest"]})
+    out1 = run(stop_json(proj, prompt_id="p1"), env)
+    assert out1.exit_code == 0 and _evidence(proj, env, out1.run_id)["verdict"] == PASS
+    md = _evidence_md(proj, env, out1.run_id)
+    assert "설정된 검사 범위에 한함" in md and "type-check" in md
+    # 비필수 검사의 실패는 전체 실패다
+    failed = [
+        RunResult(kind="pytest", status=PASS, command=["pytest"], exit_code=0),
+        RunResult(kind="type-check", status=FAIL, command=["mypy"], exit_code=1),
+    ]
+    fake2, _ = _capture_execute(results=failed)
+    monkeypatch.setattr(hookrun, "execute", fake2)
+    (proj / "src" / "a.py").write_text("A = 2\n", encoding="utf-8")
+    out2 = run(stop_json(proj, prompt_id="p2"), env)
+    assert out2.exit_code == 2 and _evidence(proj, env, out2.run_id)["verdict"] == FAIL
+
+
+def test_외부_설정이_바뀌거나_없어지면_이전_PASS_를_재사용하지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    """설정 파일은 루트 밖에 둔다 -- 입력 지문이 아니라 정책 해시로 잡히는지 보기 위해."""
+    cfg = proj.parent / "ext.json"
+    cfg.write_text(json.dumps({"pytest": {"paths": ["tests"]}}), encoding="utf-8")
+    env2 = dict(env, CLAIMTRAIL_CONFIG=str(cfg))
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    assert run(stop_json(proj), env2).reason_code == "ok"
+    assert run(stop_json(proj), env2).reason_code == "cached_pass"
+    cfg.write_text(json.dumps({"pytest": {"paths": ["tests/fast"]}}), encoding="utf-8")
+    changed = run(stop_json(proj), env2)
+    assert changed.action == "run" and changed.reason_code == "ok"
+    assert run(stop_json(proj), env2).reason_code == "cached_pass"
+    removed = run(stop_json(proj), env)  # 설정 없음으로 전환
+    assert removed.action == "run" and removed.reason_code == "ok"
+    assert run(stop_json(proj), env).reason_code == "cached_pass"
+
+
+def test_외부_설정이_루트_설정보다_우선하고_공백_경로도_된다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    _write_config(proj, {"pytest": {"paths": ["root"]}})
+    (proj / "cfg dir").mkdir()
+    (proj / "cfg dir" / "ext.json").write_text(
+        json.dumps({"pytest": {"paths": ["ext"]}}), encoding="utf-8"
+    )
+    fake, seen = _capture_execute()
+    monkeypatch.setattr(hookrun, "execute", fake)
+    out = run(stop_json(proj), dict(env, CLAIMTRAIL_CONFIG="cfg dir/ext.json"))
+    assert out.exit_code == 0 and seen["config"].pytest_paths == ("ext",)
+    assert _evidence(proj, env, out.run_id)["config"]["source"] == "env"
+
+
+def test_설정_오류는_기록된_검증_불가이고_고치면_복구된다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    calls: list[int] = []
+    base = fake_execute(PASS)
+
+    def counting(root, timeout, deadline=None, detections=None, **kw):
+        calls.append(1)
+        return base(root, timeout, deadline, detections, **kw)
+
+    monkeypatch.setattr(hookrun, "execute", counting)
+    ok = run(stop_json(proj, prompt_id="p0"), env)
+    assert ok.exit_code == 0, "먼저 정상 PASS 가 있다"
+    assert len(calls) == 1
+    _write_config(proj, "{broken")
+    bad = run(stop_json(proj, prompt_id="p1"), env)
+    assert bad.exit_code == 2 and bad.action == "run"
+    assert bad.reason_code.startswith("bad_config:parse")
+    assert len(calls) == 1, "설정 오류면 검사 러너를 한 번도 부르지 않는다"
+    latest = (sd_of(proj, env) / "evidence.md").read_text(encoding="utf-8")
+    assert "최신본 없음" in latest and "bad_config:parse" in latest and "통과가 아니다" in latest, (
+        "이전 PASS 가 최신 증빙으로 남으면 안 된다"
+    )
+    assert "설정 오류" in _evidence_md(proj, env, bad.run_id), "실행별 증빙에 오류 절이 있다"
+    ev = _evidence(proj, env, bad.run_id)
+    assert ev["verdict"] == UNVERIFIED and ev["config"]["error_kind"] == "parse"
+    assert not ev["detections"], "깨진 설정으로 기본 범위를 몰래 돌리지 않는다"
+    # 같은 오류의 재호출은 억제된다
+    assert run(stop_json(proj, prompt_id="p1", stop_hook_active=True), env).exit_code == 0
+    # 설정을 고치면 같은 세션의 다음 Stop 이 정상 실행된다
+    _write_config(proj, {"required": ["pytest"]})
+    fixed = run(stop_json(proj, prompt_id="p1", stop_hook_active=True), env)
+    assert fixed.action == "run" and fixed.reason_code == "ok"
+    assert _evidence(proj, env, fixed.run_id)["verdict"] == PASS
+    # 명시한 외부 설정이 없으면 루트 설정으로 대체하지 않는다
+    missing = run(stop_json(proj, prompt_id="p2"), dict(env, CLAIMTRAIL_CONFIG="nope/none.json"))
+    assert missing.exit_code == 2 and missing.reason_code.startswith("bad_config:missing_explicit")
+    assert _evidence(proj, env, missing.run_id)["config"]["error_kind"] == "missing_explicit"
+
+
+def test_실행_중_설정이_바뀌거나_사라지면_최신_PASS_로_게시하지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    cfg = proj.parent / "ext.json"
+    cfg.write_text(json.dumps({"pytest": {"paths": ["tests"]}}), encoding="utf-8")
+    env2 = dict(env, CLAIMTRAIL_CONFIG=str(cfg))
+    base = fake_execute(PASS)
+
+    def changing(root, timeout, deadline=None, detections=None, **kw):
+        cfg.write_text(json.dumps({"pytest": {"paths": ["other"]}}), encoding="utf-8")
+        return base(root, timeout, deadline, detections, **kw)
+
+    monkeypatch.setattr(hookrun, "execute", changing)
+    out = run(stop_json(proj, prompt_id="p1"), env2)
+    assert out.exit_code == 2 and out.reason_code == "config_changed_during_run"
+    # 실행별 JSON 은 원시 판정(pass)을 남기고, 강등은 상태·최신 증빙·종료 코드에 반영된다
+    latest = (sd_of(proj, env) / "evidence.md").read_text(encoding="utf-8")
+    assert "최신본 없음" in latest and "config_changed_during_run" in latest
+    again = run(stop_json(proj, prompt_id="p1", stop_hook_active=True), env2)
+    assert again.reason_code != "cached_pass"
+
+    def vanishing(root, timeout, deadline=None, detections=None, **kw):
+        cfg.unlink()
+        return base(root, timeout, deadline, detections, **kw)
+
+    cfg.write_text(json.dumps({"pytest": {"paths": ["tests"]}}), encoding="utf-8")
+    monkeypatch.setattr(hookrun, "execute", vanishing)
+    gone = run(stop_json(proj, prompt_id="p2"), env2)
+    assert gone.exit_code == 2 and gone.reason_code.startswith("config_changed_during_run")
+
+
+def test_캐시_복원_경로도_설정_선택을_다시_확인한다(proj: Path, env: dict[str, str], monkeypatch):
+    cfg = proj.parent / "ext.json"
+    cfg.write_text(json.dumps({"pytest": {"paths": ["tests"]}}), encoding="utf-8")
+    env2 = dict(env, CLAIMTRAIL_CONFIG=str(cfg))
+    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    assert run(stop_json(proj), env2).reason_code == "ok"
+    real = hookrun.restore_latest
+
+    def tricky(state_dir, run_id):
+        cfg.write_text(json.dumps({"pytest": {"paths": ["other"]}}), encoding="utf-8")
+        return real(state_dir, run_id)
+
+    monkeypatch.setattr(hookrun, "restore_latest", tricky)
+    out = run(stop_json(proj), env2)
+    assert out.reason_code != "cached_pass", "복원 중 설정이 바뀌면 이전 PASS 를 재사용하지 않는다"
+    # 캐시를 포기한 뒤에는 처음 읽은 설정으로 실행하고, 게시 전 재확인에서 변경을 잡아 강등한다.
+    # 바뀐 설정을 조용히 채택해 통과로 게시하지 않는다.
+    assert out.action == "run" and out.reason_code == "config_changed_during_run"
+    assert out.exit_code == 2
+    # 다음 호출은 바뀐 설정으로 처음부터 실행한다(정책 해시가 달라져 캐시 없음)
+    nxt = run(stop_json(proj), env2)
+    assert nxt.action == "run" and nxt.reason_code == "ok"
+
+
+def test_설정_오류면_생성_검사도_실행하지_않는다(proj: Path, env: dict[str, str], monkeypatch):
+    """설정 오류 = 모든 검사 중단. 기존 검사뿐 아니라 자동 도출의 생성 검사도 돌리지 않는다."""
+    from claimtrail.derive import enable, submit
+    from claimtrail.hookscan import parse_watch
+
+    enable(sd_of(proj, env))
+    gen = proj.parent / "scratch" / "test_derived.py"
+    gen.parent.mkdir(parents=True, exist_ok=True)
+    gen.write_text("def test_generated():\n    assert True\n", encoding="utf-8")
+    doc = {
+        "schema": 1,
+        "status": "performed",
+        "request": "r",
+        "items": [
+            {
+                "id": "G1",
+                "kind": "requirement",
+                "behavior": "b",
+                "why": "w",
+                "basis": "README.md:1",
+                "how": {"generated": "test_derived.py::test_generated"},
+            }
+        ],
+    }
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", doc, [gen])
+    execute_calls: list[int] = []
+    generated_calls: list[int] = []
+    base = fake_execute(PASS)
+
+    def counting_execute(root, timeout, deadline=None, detections=None, **kw):
+        execute_calls.append(1)
+        return base(root, timeout, deadline, detections, **kw)
+
+    def counting_generated(*args, **kwargs):
+        generated_calls.append(1)
+        return RunResult(kind="derived-tests", status=PASS, command=["pytest"], exit_code=0)
+
+    monkeypatch.setattr(hookrun, "execute", counting_execute)
+    monkeypatch.setattr(hookrun, "run_generated", counting_generated)
+    # 설정은 루트 밖에 둔다 -- 루트에 쓰면 입력 지문이 바뀌어 도출이 stale 이 되고 재현이 안 된다
+    broken = proj.parent / "broken.json"
+    broken.write_text("{broken", encoding="utf-8")
+    out = run(stop_json(proj, prompt_id="p-1"), dict(env, CLAIMTRAIL_CONFIG=str(broken)))
+    assert out.exit_code == 2 and out.reason_code.startswith("bad_config:parse")
+    assert execute_calls == [], "기존 검사 러너 호출 0회"
+    assert generated_calls == [], "생성 검사 러너 호출도 0회"
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["derive"]["status"] == "performed"
+    assert ev["derive"]["items"][0]["link_status"] == "unlinked", "연결을 시도하지 않았다"
+
+
+def test_검사_범위_설정이_있어도_도출_제출은_stale_이_아니다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    """도출의 policy_hash 는 감시 정책만 담는다. CLI 의 submit 은 훅의 설정(특히
+    CLAIMTRAIL_CONFIG 로 준 외부 파일)을 볼 수 없으므로, 설정을 넣으면 설정이 있는
+    프로젝트의 모든 제출이 '감시 정책이 다르다' 로 stale 이 된다."""
+    from claimtrail.derive import enable, submit
+    from claimtrail.hookscan import parse_watch
+
+    enable(sd_of(proj, env))
+    _write_config(proj, {"pytest": {"paths": ["tests"]}})  # 제출 전에 써서 입력 지문에 포함
+    doc = {"schema": 1, "status": "not_applicable", "reason": "설명만 한 대화"}
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-1", doc)
+    fake, _seen = _capture_execute()
+    monkeypatch.setattr(hookrun, "execute", fake)
+    out = run(stop_json(proj, prompt_id="p-1"), env)
+    assert out.exit_code == 0 and out.reason_code == "ok"
+    ev = _evidence(proj, env, out.run_id)
+    assert ev["derive"]["status"] == "not_applicable", ev["derive"]
+    # 외부 설정(CLAIMTRAIL_CONFIG)도 같다 -- CLI 쪽 환경에는 그 변수가 없다
+    ext = proj.parent / "ext.json"
+    ext.write_text(json.dumps({"pytest": {"paths": ["tests"]}}), encoding="utf-8")
+    submit(sd_of(proj, env), proj, parse_watch(None), "sess-1", "p-2", doc)
+    out2 = run(stop_json(proj, prompt_id="p-2"), dict(env, CLAIMTRAIL_CONFIG=str(ext)))
+    assert out2.exit_code == 0 and out2.reason_code == "ok"
+    assert _evidence(proj, env, out2.run_id)["derive"]["status"] == "not_applicable"

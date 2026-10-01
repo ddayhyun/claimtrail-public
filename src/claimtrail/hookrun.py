@@ -38,6 +38,7 @@ from .derive import (
 )
 from .derive_run import attach_links, load_evidence, run_generated
 from .detect import detect_all
+from .hookconfig import select_config
 from .hookcontext import execution_context
 from .hooklock import LockUnavailable, RunLock, backend_name
 from .hookscan import Fingerprint, fingerprint, parse_watch, resolve_root
@@ -449,7 +450,17 @@ class _Runner:
 
     def _locked(self, root: Path, policy, run_id: str) -> Outcome:
         assert self.state_dir is not None
-        policy_hash = policy.policy_hash()
+        # 검사 범위 설정(2e). 없으면 정책 해시가 예전과 같다. 깨졌거나 명시한 파일이 없으면
+        # 기본 범위로 대신 돌리지 않고 설정 오류로 기록한다(아래). 오류도 해시에 들어가므로
+        # 깨진 설정 상태에서 이전 PASS 를 재사용하는 일은 없다.
+        config_sel = select_config(root, self.env)
+        policy_hash = policy.policy_hash(config_sel.policy_payload())
+        if config_sel.source != "none":
+            self.log(
+                "config",
+                config_sel.source if config_sel.ok else config_sel.error_kind,
+                config_sel.path if config_sel.ok else config_sel.error_detail,
+            )
         note = self._context_note()
 
         loaded = load_state_result(self.state_dir)
@@ -478,6 +489,10 @@ class _Runner:
         # 이번 작업(상태 폴더·세션·프롬프트)의 도출 목록. 없으면 미수행이고, 그것은
         # 기존 검사 판정을 바꾸지 않는다 -- 다만 증빙에 별개의 축으로 남는다.
         # 활성화 표식은 미수행의 뜻만 가른다(기대했는데 안 함 / 애초에 안 켬).
+        # 도출 기록의 policy_hash 는 감시 정책만 담는다(검사 범위 설정 제외). 제출하는 CLI 는
+        # 훅의 설정 -- 특히 CLAIMTRAIL_CONFIG 로 준 외부 파일 -- 을 볼 수 없으므로, 설정을
+        # 넣으면 설정이 있는 프로젝트의 모든 제출이 stale 이 된다. 설정 범위는 연결 단계에서
+        # 실제 결과(미수집 등)로 드러나고, 캐시 판단에는 위의 policy_hash(설정 포함)를 쓴다.
         derive = self._timed(
             "derive",
             load_derive,
@@ -485,7 +500,7 @@ class _Runner:
             self.stop.session_id,
             self.stop.prompt_id,
             before.digest,
-            policy_hash,
+            policy.policy_hash(),
             active=derive_enabled(self.state_dir),
         )
         self.log("derive", derive.status, derive.detail)
@@ -500,7 +515,13 @@ class _Runner:
 
         # 탐지는 한 번. 환경 지문은 탐지된 검증기 기준이고, execute 도 같은
         # 탐지 결과를 받는다. 두 번 돌리면 그 사이에 답이 달라질 수 있다.
-        detections = self._timed("detect", detect_all, root)
+        # 설정이 없으면 호출 형태가 예전과 완전히 같다(가짜 detect 를 쓰는 테스트와 호환).
+        if not config_sel.ok:
+            detections = []  # 깨진 설정으로 기본 범위를 대신 돌리지 않는다
+        elif config_sel.config is None:
+            detections = self._timed("detect", detect_all, root)
+        else:
+            detections = self._timed("detect", detect_all, root, config_sel.config)
         context = self._timed("context", execution_context, root, detections)
         if not context.ok:
             # 캐시만 포기한다. 검증은 한다.
@@ -534,7 +555,15 @@ class _Runner:
             except OSError as exc:
                 restored = None
                 self.log("restorefail", "restore_failed", f"{previous.run_id}: {exc}")
-            if restored is not None:
+            config_now = select_config(root, self.env) if restored is not None else None
+            if config_now is not None and config_now.signature() != config_sel.signature():
+                # 복원하는 사이 검사 범위 설정이 바뀌었다. 그 PASS 는 다른 범위의 것이다.
+                self.log(
+                    "nocache",
+                    "config_changed",
+                    "캐시 복원 중 검사 범위 설정이 바뀌었다 — 재사용하지 않는다",
+                )
+            elif restored is not None:
                 # 재사용하는 것은 기존 검사의 PASS 증빙이다. 도출 항목을 확인했다는 근거가
                 # 아니다 -- 2a 의 항목은 전부 실행 증거 미연결이다.
                 self.log(
@@ -575,8 +604,9 @@ class _Runner:
                                 run_id=previous.run_id,
                             )
                 return Outcome(0, "skip", "cached_pass", run_id=previous.run_id)
-            # 건너뛸 근거를 다시 세우지 못했다. 성공으로 끝내지 않는다.
-            self.log("restorefail", "restore_failed", previous.run_id)
+            else:
+                # 건너뛸 근거를 다시 세우지 못했다. 성공으로 끝내지 않는다.
+                self.log("restorefail", "restore_failed", previous.run_id)
 
         self._invalidate(run_id)
         begin_run(
@@ -597,18 +627,31 @@ class _Runner:
         evidence_dir = self.state_dir / "runs" / f"{run_id}.evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         existing_inv = new_run_id()
-        detections, results = self._timed(
-            "execute",
-            execute,
-            root,
-            self._runner_timeout(),
-            self.deadline,
-            detections=detections,
-            evidence_dir=evidence_dir,
-            invocation_id=existing_inv,
-        )
-        verdict = overall_verdict(results)
-        derive = self._link_derive(derive, root, evidence_dir, existing_inv)
+        results: list[RunResult] = []
+        if config_sel.ok:
+            # 설정이 있을 때만 config 를 넘긴다 -- 없으면 호출 형태가 예전과 같다.
+            extra = {"config": config_sel.config} if config_sel.config is not None else {}
+            detections, results = self._timed(
+                "execute",
+                execute,
+                root,
+                self._runner_timeout(),
+                self.deadline,
+                detections=detections,
+                evidence_dir=evidence_dir,
+                invocation_id=existing_inv,
+                **extra,
+            )
+        # 설정의 required 가 있으면 CLI 와 같은 규칙: 필수 검사가 전부 통과해야 통과이고,
+        # 필수가 아닌 검사의 검증 불가는 판정을 막지 않는다(실패는 여전히 실패).
+        required = config_sel.config.required if config_sel.config is not None else ()
+        verdict = overall_verdict(results, required)
+        # 설정 오류는 모든 검사 중단이다 -- 자동 도출의 생성 검사도 돌리지 않고, 항목은
+        # 연결을 시도하지 않은 채(unlinked) 남긴다. 설정을 고친 다음 실행에서 연결한다.
+        if config_sel.ok:
+            derive = self._link_derive(derive, root, evidence_dir, existing_inv)
+        else:
+            self.log("generated", "skipped", "설정 오류로 생성 검사·연결을 건너뛰었다")
         # 연결까지 끝난 뒤의 되돌림 사유. 판정(verdict)과는 별개의 축이다.
         notice = derive_notice(derive)
         # note 를 파싱하지 않는다. 사람이 읽는 문구를 판단 근거로 쓰면
@@ -620,12 +663,17 @@ class _Runner:
         paths = run_paths(self.state_dir, run_id)
 
         def write_evidence() -> tuple[str, str]:
-            evidence = build_json(root, detections, results)
+            cfg_args = (config_sel.config,) if config_sel.config is not None else ()
+            evidence = build_json(root, detections, results, *cfg_args)
+            evidence["config"] = config_sel.section()
             evidence["derive"] = derive_section(derive)
             payload = json.dumps(evidence, ensure_ascii=False, indent=2)
             paths["tmp_json"].write_text(payload, encoding="utf-8")
             paths["tmp_md"].write_text(
-                _with_derive(build_markdown(root, detections, results), derive_markdown(derive)),
+                _with_derive(
+                    build_markdown(root, detections, results, *cfg_args),
+                    config_sel.markdown_lines() + derive_markdown(derive),
+                ),
                 encoding="utf-8",
             )
             return self.crosscheck(paths["tmp_json"], root, verdict)
@@ -633,6 +681,20 @@ class _Runner:
         code, detail = self._timed("evidence", write_evidence)
         after = self._timed("fp_after", fingerprint, root, policy)
         final = finalize(before, after, verdict, code, detail)
+        # 설정 선택을 같은 절차로 다시 해 본다. 실행 중 바뀌었으면(없음↔있음·내용·오류) 이 결과는
+        # 이전 범위의 것이다 -- 입력 변경과 같은 길로 보내 최신 PASS 로 게시·캐시하지 않는다.
+        config_after = select_config(root, self.env)
+        if final.reason_code == "ok" and config_after.signature() != config_sel.signature():
+            final = degrade(
+                final,
+                "config_changed_during_run",
+                f"실행 중 검사 범위 설정이 바뀌었다: {config_sel.signature()[:48]} -> "
+                f"{config_after.signature()[:48]}",
+            )
+        if final.reason_code == "ok" and not config_sel.ok:
+            # 설정 오류는 기록된 검증 불가다. 사유에 오류 종류·원문 해시가 들어가 같은 오류의
+            # 재호출은 억제되고, 설정을 고치면 서명이 달라져 다음 Stop 이 정상 실행된다.
+            final = degrade(final, config_sel.reason_code(), config_sel.error_detail)
 
         if timed_out and final.reason_code == "ok":
             # 예산이 끝나 일부를 돌리지 못했다. 그 사실이 판정 코드에 남아야

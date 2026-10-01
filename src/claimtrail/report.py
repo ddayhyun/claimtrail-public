@@ -182,7 +182,8 @@ def _scope_lines(config: Config, results: list[RunResult], verdict: str) -> list
         not_ok = [k for k, v in status.items() if v != PASS]
         if verdict == PASS:
             lines.append(
-                "> 이 통과는 **위 설정 범위의 통과**다. 설정에 없는 검사는 확인하지 않았다."
+                "> **통과 — 설정된 검사 범위에 한함.** 설정에 없는 검사는 확인하지 않았고, "
+                "필수가 아닌 검사의 검증 불가는 이 판정을 막지 않는다."
             )
         elif verdict == UNVERIFIED and not_ok:
             lines.append(
