@@ -1686,13 +1686,22 @@ def test_외부_설정이_루트_설정보다_우선하고_공백_경로도_된�
 def test_설정_오류는_기록된_검증_불가이고_고치면_복구된다(
     proj: Path, env: dict[str, str], monkeypatch
 ):
-    monkeypatch.setattr(hookrun, "execute", fake_execute(PASS))
+    calls: list[int] = []
+    base = fake_execute(PASS)
+
+    def counting(root, timeout, deadline=None, detections=None, **kw):
+        calls.append(1)
+        return base(root, timeout, deadline, detections, **kw)
+
+    monkeypatch.setattr(hookrun, "execute", counting)
     ok = run(stop_json(proj, prompt_id="p0"), env)
     assert ok.exit_code == 0, "먼저 정상 PASS 가 있다"
+    assert len(calls) == 1
     _write_config(proj, "{broken")
     bad = run(stop_json(proj, prompt_id="p1"), env)
     assert bad.exit_code == 2 and bad.action == "run"
     assert bad.reason_code.startswith("bad_config:parse")
+    assert len(calls) == 1, "설정 오류면 검사 러너를 한 번도 부르지 않는다"
     latest = (sd_of(proj, env) / "evidence.md").read_text(encoding="utf-8")
     assert "최신본 없음" in latest and "bad_config:parse" in latest and "통과가 아니다" in latest, (
         "이전 PASS 가 최신 증빙으로 남으면 안 된다"
@@ -1760,3 +1769,10 @@ def test_캐시_복원_경로도_설정_선택을_다시_확인한다(proj: Path
     monkeypatch.setattr(hookrun, "restore_latest", tricky)
     out = run(stop_json(proj), env2)
     assert out.reason_code != "cached_pass", "복원 중 설정이 바뀌면 이전 PASS 를 재사용하지 않는다"
+    # 캐시를 포기한 뒤에는 처음 읽은 설정으로 실행하고, 게시 전 재확인에서 변경을 잡아 강등한다.
+    # 바뀐 설정을 조용히 채택해 통과로 게시하지 않는다.
+    assert out.action == "run" and out.reason_code == "config_changed_during_run"
+    assert out.exit_code == 2
+    # 다음 호출은 바뀐 설정으로 처음부터 실행한다(정책 해시가 달라져 캐시 없음)
+    nxt = run(stop_json(proj), env2)
+    assert nxt.action == "run" and nxt.reason_code == "ok"
