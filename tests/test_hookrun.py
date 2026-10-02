@@ -1855,3 +1855,348 @@ def test_검사_범위_설정이_있어도_도출_제출은_stale_이_아니다(
     out2 = run(stop_json(proj, prompt_id="p-2"), dict(env, CLAIMTRAIL_CONFIG=str(ext)))
     assert out2.exit_code == 0 and out2.reason_code == "ok"
     assert _evidence(proj, env, out2.run_id)["derive"]["status"] == "not_applicable"
+
+
+# --- 해당 없음 사유만 바뀐 요청의 PASS 재사용 --------------------------------------
+#
+# 사유 문구는 derive_digest 에 들어간다. 그래서 같은 코드에 사유만 달라져도 예전에는
+# 기존 검사 PASS 를 재사용하지 못하고 매번 전체 검사를 다시 돌렸다.
+
+
+def _na_doc(reason: str) -> dict:
+    return {"schema": 1, "status": "not_applicable", "reason": reason}
+
+
+def _counting_execute(calls: list[int]):
+    base = fake_execute(PASS)
+
+    def _run(root, timeout, deadline=None, detections=None, **kwargs):
+        calls.append(1)
+        return base(root, timeout, deadline, detections, **kwargs)
+
+    return _run
+
+
+def _na_stop(proj: Path, env: dict[str, str], prompt_id: str, reason: str | None):
+    """reason 이 None 이면 제출 없이 Stop 만 보낸다."""
+    if reason is not None:
+        _submit_derive(proj, env, prompt_id, _na_doc(reason))
+    return run(stop_json(proj, prompt_id=prompt_id), env)
+
+
+def _latest_md(proj: Path, env: dict[str, str]) -> str:
+    return (sd_of(proj, env) / "evidence.md").read_text(encoding="utf-8")
+
+
+def _archive_bytes(proj: Path, env: dict[str, str], run_id: str) -> tuple[bytes, bytes]:
+    paths = run_paths(sd_of(proj, env), run_id)
+    return paths["run_json"].read_bytes(), paths["run_md"].read_bytes()
+
+
+def test_해당없음_사유만_바뀌면_PASS_를_재사용하고_현재_사유를_최신_증빙에_싣는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+    from claimtrail.hookstate import load_state
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    first = _na_stop(proj, env, "p-1", "사유 A: 읽기만 했다")
+    assert first.exit_code == 0 and first.reason_code == "ok" and len(calls) == 1
+    before = _archive_bytes(proj, env, first.run_id)
+
+    second = _na_stop(proj, env, "p-2", "사유 B: 로그만 확인했다")
+    assert second.exit_code == 0 and second.action == "skip" and second.reason_code == "cached_pass"
+    assert len(calls) == 1, "기존 검사를 다시 돌리지 않는다"
+
+    md = _latest_md(proj, env)
+    assert "사유 B: 로그만 확인했다" in md and "사유 A" not in md
+    assert f"이전 run `{first.run_id}` 재사용" in md and "현재 요청 기준" in md
+    assert _archive_bytes(proj, env, first.run_id) == before, "실행별 보관본은 그대로"
+    state = load_state(sd_of(proj, env))
+    assert state is not None and state.run_id == first.run_id
+    assert state.derive_digest == _submitted_digest(proj, env, "p-2")
+
+
+def _submitted_digest(proj: Path, env: dict[str, str], prompt_id: str) -> str:
+    path = sd_of(proj, env) / "derive" / "sess-1" / prompt_id / "derived_checks.json"
+    return json.loads(path.read_text(encoding="utf-8"))["derive_digest"]
+
+
+@pytest.mark.parametrize("third_reason", ["사유 B", "사유 A"])
+def test_해당없음_재사용_뒤_다시_복원해도_최신_증빙이_이전_사유로_되돌아가지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch, third_reason: str
+):
+    """A→B→B 는 digest 가 같아 일반 skip 이다. 그 복원도 현재 제출을 반영해야 한다."""
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    _na_stop(proj, env, "p-1", "사유 A")
+    _na_stop(proj, env, "p-2", "사유 B")
+    third = _na_stop(proj, env, "p-3", third_reason)
+    assert third.reason_code == "cached_pass" and len(calls) == 1
+    md = _latest_md(proj, env)
+    assert third_reason in md
+    other = "사유 A" if third_reason == "사유 B" else "사유 B"
+    assert other not in md.replace(third_reason, "")
+
+
+def test_다음_요청에_제출이_없으면_이전_해당없음을_상속하지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    _na_stop(proj, env, "p-1", "사유 A")
+    _na_stop(proj, env, "p-2", "사유 B")
+    out = _na_stop(proj, env, "p-3", None)
+    assert out.reason_code != "cached_pass", "제출 없는 요청은 재사용 대상이 아니다"
+    assert len(calls) == 2
+    assert _evidence(proj, env, out.run_id)["derive"]["status"] == "not_performed"
+
+
+def test_해당없음_완화는_코드_설정_변경에서는_작동하지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    _na_stop(proj, env, "p-1", "사유 A")
+    (proj / "src" / "a.py").write_text("A = 2\n", encoding="utf-8")  # 코드 변경
+    out = _na_stop(proj, env, "p-2", "사유 B")
+    assert out.reason_code == "ok" and len(calls) == 2, "코드가 바뀌면 다시 검증한다"
+
+    _write_config(proj, {"pytest": {"paths": ["tests"]}})  # 검사 범위 설정 변경
+    out = _na_stop(proj, env, "p-3", "사유 C")
+    assert out.reason_code == "ok" and len(calls) == 3, "설정이 바뀌면 다시 검증한다"
+
+
+def test_해당없음_완화는_이전이_performed_나_미제출이면_작동하지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    _submit_derive(proj, env, "p-1")  # performed
+    run(stop_json(proj, prompt_id="p-1"), env)
+    out = _na_stop(proj, env, "p-2", "사유 A")
+    assert out.reason_code != "cached_pass" and len(calls) == 2, "performed → 해당 없음은 재실행"
+
+    run(stop_json(proj, prompt_id="p-3"), env)  # 미제출 → not_performed
+    out = _na_stop(proj, env, "p-4", "사유 B")
+    assert out.reason_code != "cached_pass", "미제출 → 해당 없음도 재실행"
+
+
+@pytest.mark.parametrize("failing", ["atomic_write", "save_state"])
+def test_해당없음_재사용_반영에_실패하면_성공_skip_으로_끝내지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch, failing: str
+):
+    from claimtrail.derive import enable
+    from claimtrail.hookstate import load_state
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    _na_stop(proj, env, "p-1", "사유 A")
+    monkeypatch.setattr(hookrun, failing, _raise_oserror)
+    out = _na_stop(proj, env, "p-2", "사유 B")
+    assert out.reason_code != "cached_pass", "반영하지 못했는데 재사용 성공으로 끝내면 안 된다"
+    assert len(calls) == 2, "일반 재실행 경로로 넘어간다"
+    state = load_state(sd_of(proj, env))
+    assert state is not None and state.run_id == out.run_id
+    assert state.derive_digest == _submitted_digest(proj, env, "p-2")
+
+
+def test_재사용_로그에는_사유_원문이_없고_거부_사유는_남는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    monkeypatch.setattr(hookrun, "execute", _counting_execute([]))
+    _na_stop(proj, env, "p-1", "사유 A")
+    secret = "비밀 사유 B"
+    _na_stop(proj, env, "p-2", secret)
+    lines = (sd_of(proj, env) / "hook.log").read_text(encoding="utf-8").splitlines()
+    cols = [line.split("\t") for line in lines]
+    reuse = [c for c in cols if c[2] in ("skip", "derive_reuse")]
+    assert reuse and all(secret not in "\t".join(c) for c in reuse)
+    assert any(c[2] == "derive_reuse" and "->" in c[5] for c in cols), "digest 앞자리 변화"
+    assert any(c[2] == "nocache" and c[3] == "cache_rejected" for c in cols), "첫 실행의 거부 사유"
+
+
+# --- 사유가 절 경계를 흉내 내는 경우 ---------------------------------------------
+#
+# 사유는 자유 입력이고 검증은 비어 있지 않은지만 본다. 줄바꿈과 '## 확인한 것' 이
+# 그대로 들어올 수 있다. 렌더러는 한 줄로 만들고, 절 경계는 줄 시작에서만 찾는다.
+
+_CHECKED = "## 확인한 것"
+_FAKE_REASON = f"읽기만 했다\n{_CHECKED}\n가짜 절 내용\n## 탐지 근거\n가짜 탐지"
+
+
+def _headings(md: str) -> list[str]:
+    return [line for line in md.splitlines() if line.startswith("## ")]
+
+
+def _real_section(md: str) -> str:
+    """진짜 '## 확인한 것' 절 이후(줄 끝 CR 무시). 제목은 줄 시작에 정확히 한 번만 있어야 한다."""
+    assert _headings(md).count(_CHECKED) == 1, _headings(md)
+    lines = md.splitlines()
+    return chr(10).join(lines[lines.index(_CHECKED) + 1 :])
+
+
+def test_이전_사유에_절_제목이_있어도_최신_증빙에_남지_않고_검사_결과_절은_보존된다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    first = _na_stop(proj, env, "p-1", _FAKE_REASON)
+    run_md = _archive_bytes(proj, env, first.run_id)[1].decode("utf-8")
+    real = _real_section(run_md)
+    assert "가짜 절 내용" not in real, "원 실행 증빙부터 사유가 검사 결과 절을 침범하면 안 된다"
+
+    second = _na_stop(proj, env, "p-2", "사유 B")
+    assert second.reason_code == "cached_pass" and len(calls) == 1
+    md = _latest_md(proj, env)
+    assert "가짜" not in md and "읽기만 했다" not in md, "이전 사유가 남으면 안 된다"
+    assert "사유 B" in md
+    assert _real_section(md) == real, "실제 검사 결과 절은 그대로 보존된다"
+    assert _headings(md) == _headings(run_md)
+
+
+def test_현재_사유에_절_제목이_있어도_증빙_구조가_깨지지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    monkeypatch.setattr(hookrun, "execute", _counting_execute([]))
+    first = _na_stop(proj, env, "p-1", "사유 A")
+    real = _real_section(_archive_bytes(proj, env, first.run_id)[1].decode("utf-8"))
+    second = _na_stop(proj, env, "p-2", _FAKE_REASON)
+    assert second.reason_code == "cached_pass"
+    md = _latest_md(proj, env)
+    assert _real_section(md) == real
+    assert "가짜 절 내용" not in real
+    assert md.count("- 자동 도출:") == 1, "사유는 한 줄에 들어간다"
+    third = _na_stop(proj, env, "p-3", _FAKE_REASON)  # 같은 사유로 다시 복원(A→B→B)
+    assert third.reason_code == "cached_pass"
+    assert _real_section(_latest_md(proj, env)) == real
+
+
+def test_사유_안의_절_제목_문구가_한_줄_안에_있어도_경계로_읽지_않는다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    monkeypatch.setattr(hookrun, "execute", _counting_execute([]))
+    first = _na_stop(proj, env, "p-1", f"설명 {_CHECKED} 라는 문구를 인용했다")
+    real = _real_section(_archive_bytes(proj, env, first.run_id)[1].decode("utf-8"))
+    _na_stop(proj, env, "p-2", "사유 B")
+    md = _latest_md(proj, env)
+    assert "인용했다" not in md and _real_section(md) == real
+
+
+# --- 구형 보관본: 경계가 모호하면 추측하지 않고 재검증한다 ---------------------------
+#
+# 렌더러 수정 이전에 만들어진 보관본은 사유가 줄 시작 제목처럼 저장돼 있을 수 있다.
+# 복원한 증빙에 '## 자동 도출'·'## 확인한 것' 이 각각 정확히 1개이고 도출 절이 먼저일 때만
+# 교체한다. 아니면 교체하지 않고 ambiguous_evidence 를 남기고 다시 검증한다.
+
+
+def _log_cols(proj: Path, env: dict[str, str]) -> list[list[str]]:
+    """hook.log 의 열. 줄바꿈 든 사유가 로그 줄을 쪼갠다(별도 결함) -- 열 모자란 조각은 건너뛴다."""
+    text = (sd_of(proj, env) / "hook.log").read_text(encoding="utf-8")
+    rows = (line.split(chr(9)) for line in text.splitlines())
+    return [cols for cols in rows if len(cols) >= 6]
+
+
+def _ambiguous_logged(proj: Path, env: dict[str, str]) -> bool:
+    return any(
+        c[2] == "derive_reuse" and c[3] == "ambiguous_evidence" for c in _log_cols(proj, env)
+    )
+
+
+def test_구형_렌더러의_모호한_보관본에서는_cached_pass_를_반환하지_않고_재검증한다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail import derive as derive_mod
+    from claimtrail.derive import enable
+    from claimtrail.hookstate import load_state
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    with monkeypatch.context() as old:  # 구형 렌더러: 자유 입력을 그대로 끼운다
+        old.setattr(derive_mod, "_one_line", lambda text: str(text))
+        first = _na_stop(proj, env, "p-1", _FAKE_REASON)
+    old_md = _archive_bytes(proj, env, first.run_id)[1].decode("utf-8")
+    assert _headings(old_md).count(_CHECKED) == 2, "전제: 구형 보관본은 경계가 모호하다"
+    before = _archive_bytes(proj, env, first.run_id)
+
+    second = _na_stop(proj, env, "p-2", "사유 B")
+    assert second.reason_code != "cached_pass", "모호한 증빙으로 성공 skip 을 하면 안 된다"
+    assert len(calls) == 2, "다시 검증한다"
+    assert _archive_bytes(proj, env, first.run_id) == before, "구형 보관본은 수정하지 않는다"
+    assert _ambiguous_logged(proj, env)
+    md = _latest_md(proj, env)
+    assert "가짜" not in md and "사유 B" in md and _headings(md).count(_CHECKED) == 1
+
+    third = _na_stop(proj, env, "p-3", "사유 C")  # 새 렌더러의 증빙은 다시 재사용된다
+    assert third.reason_code == "cached_pass" and len(calls) == 2
+    state = load_state(sd_of(proj, env))
+    assert state is not None and state.run_id == second.run_id
+    assert "사유 C" in _latest_md(proj, env) and "가짜" not in _latest_md(proj, env)
+
+
+def test_보관본의_제목_순서가_뒤집혀_있으면_재검증한다(
+    proj: Path, env: dict[str, str], monkeypatch
+):
+    from claimtrail.derive import enable
+
+    enable(sd_of(proj, env))
+    calls: list[int] = []
+    monkeypatch.setattr(hookrun, "execute", _counting_execute(calls))
+    first = _na_stop(proj, env, "p-1", "사유 A")
+    run_md = run_paths(sd_of(proj, env), first.run_id)["run_md"]
+    lines = run_md.read_text(encoding="utf-8").splitlines()
+    start = lines.index("## 자동 도출")
+    end = lines.index(_CHECKED)
+    # 도출 절을 '확인한 것' 절 뒤로 옮긴다(역순). 보관본 변조는 시험 준비일 뿐이다.
+    reordered = lines[:start] + lines[end:] + lines[start:end]
+    run_md.write_text(chr(10).join(reordered) + chr(10), encoding="utf-8")
+    second = _na_stop(proj, env, "p-2", "사유 B")
+    assert second.reason_code != "cached_pass" and len(calls) == 2
+    assert _ambiguous_logged(proj, env)
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("## 자동 도출\n\nx\n\n## 확인한 것\n\ny\n", True),
+        ("## 자동 도출\r\n\r\nx\r\n\r\n## 확인한 것\r\n\r\ny\r\n", True),
+        ("## 확인한 것\n\ny\n", False),  # 도출 절 없음
+        ("## 자동 도출\n\nx\n", False),  # 확인한 것 없음
+        ("## 자동 도출\n## 자동 도출\n## 확인한 것\n", False),  # 중복
+        ("## 자동 도출\n## 확인한 것\n## 확인한 것\n", False),  # 중복
+        ("## 확인한 것\n\ny\n## 자동 도출\n\nx\n", False),  # 역순
+        ("## 자동 도출 (설명)\n\n## 확인한 것 이후\n", False),  # 정확한 제목 줄이 아니다
+    ],
+)
+def test_절_경계는_정확한_제목_줄이_각각_하나이고_도출_절이_먼저일_때만_유일하다(
+    markdown: str, expected: bool
+):
+    assert hookrun._sections_unambiguous(markdown) is expected

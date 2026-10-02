@@ -491,3 +491,17 @@ def test_가린_결과가_사전이_아니면_조용히_넘기지_않고_멈춘�
     monkeypatch.setattr(derive, "_redacted", lambda value: ["not", "a", "dict"])
     with pytest.raises(TypeError, match="사전"):
         derive._redacted_item({"id": "D1"})
+
+
+def test_자유_입력은_한_줄로_그려져_절_제목을_흉내_내지_못한다():
+    from claimtrail.derive import DeriveStatus, derive_markdown
+
+    nasty = "읽기만 했다\n## 확인한 것\r\n가짜\r## 탐지 근거\u2028## 또 다른\u2029끝"
+    for ds in (
+        DeriveStatus(NOT_APPLICABLE, nasty, "d" * 64),
+        DeriveStatus(NOT_APPLICABLE, "x", "d" * 64, request=nasty),
+    ):
+        lines = derive_markdown(ds)
+        assert [x for x in lines if x.startswith("## ")] == ["## 자동 도출"]
+        assert sum(1 for x in lines if x.startswith("- 자동 도출:")) == 1
+        assert all("\n" not in x and "\r" not in x for x in lines)
