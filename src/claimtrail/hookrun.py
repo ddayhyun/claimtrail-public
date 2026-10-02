@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import time
 from dataclasses import dataclass, field, replace
@@ -114,28 +115,46 @@ def _int_env(env: dict[str, str], key: str, default: int) -> int:
         return default
 
 
+# 절 경계는 줄 시작의 제목 줄만이다. 사유 같은 자유 입력 안의 같은 문구는 경계가 아니다.
+# 증빙은 \r\n 으로 저장되기도 하므로 줄 끝의 \r 을 허용한다. (입력 쪽은 derive._one_line 이
+# 줄바꿈을 없애 자유 입력이 줄 시작에 놓이지 못하게 한다 -- 둘이 함께 경계를 지킨다.)
+_DERIVE_HEADING = re.compile(r"^## 자동 도출[ \t\r]*$", re.MULTILINE)
+_CHECKED_HEADING = re.compile(r"^## 확인한 것[ \t\r]*$", re.MULTILINE)
+
+
 def _with_derive(markdown: str, derive_lines: list[str]) -> str:
-    """Markdown 증빙의 '## 확인한 것' 앞에 자동 도출 절을 끼운다. 표식이 없으면 끝에 붙인다."""
+    """Markdown 증빙의 '## 확인한 것' 앞에 자동 도출 절을 끼운다. 제목이 없으면 끝에 붙인다."""
     block = chr(10).join(derive_lines)
-    marker = "## 확인한 것"
-    if marker in markdown:
-        return markdown.replace(marker, block + chr(10) + marker, 1)
+    found = _CHECKED_HEADING.search(markdown)
+    if found:
+        return markdown[: found.start()] + block + chr(10) + markdown[found.start() :]
     return markdown.rstrip(chr(10)) + chr(10) + chr(10) + block
+
+
+def _sections_unambiguous(markdown: str) -> bool:
+    """도출 절의 경계가 유일한가: 정확한 제목 줄이 각각 1개이고 도출 절이 먼저다.
+
+    렌더러가 자유 입력을 한 줄로 만들기 전에 저장된 보관본은 사유가 제목 줄처럼 들어 있을 수
+    있다. 그런 증빙의 경계는 추측하지 않는다 -- 호출자는 교체하지 않고 다시 검증한다.
+    """
+    derive = list(_DERIVE_HEADING.finditer(markdown))
+    checked = list(_CHECKED_HEADING.finditer(markdown))
+    return len(derive) == 1 and len(checked) == 1 and derive[0].start() < checked[0].start()
 
 
 def _replace_derive_block(markdown: str, derive_lines: list[str]) -> str:
     """최신 증빙의 '## 자동 도출' 절을 교체한다. 절이 없으면 _with_derive 처럼 끼운다.
 
-    복원한 증빙은 이전 요청의 도출 절을 들고 있다. 그 절 끝은 '## 확인한 것' 앞이다.
+    복원한 증빙은 이전 요청의 도출 절을 들고 있다. 그 절 끝은 줄 시작의 '## 확인한 것' 앞이다.
     """
-    start = markdown.find("## 자동 도출")
-    if start == -1:
+    start = _DERIVE_HEADING.search(markdown)
+    if start is None:
         return _with_derive(markdown, derive_lines)
-    end = markdown.find("## 확인한 것", start)
+    end = _CHECKED_HEADING.search(markdown, start.end())
     block = chr(10).join(derive_lines)
-    if end == -1:
-        return markdown[:start] + block
-    return markdown[:start] + block + chr(10) + markdown[end:]
+    if end is None:
+        return markdown[: start.start()] + block
+    return markdown[: start.start()] + block + chr(10) + markdown[end.start() :]
 
 
 @dataclass
@@ -848,6 +867,14 @@ class _Runner:
         )
         try:
             body = latest.read_bytes().decode("utf-8")
+            if not _sections_unambiguous(body):
+                # 아직 아무것도 쓰지 않았다. 최신 증빙은 복원된 이전 run 의 것 그대로다.
+                self.log(
+                    "derive_reuse",
+                    "ambiguous_evidence",
+                    f"{previous.run_id}: 도출 절 경계가 유일하지 않아 교체하지 않고 다시 검증한다",
+                )
+                return False
             atomic_write(latest, _replace_derive_block(body, lines).encode("utf-8"))
             if derive_changed:
                 save_state(

@@ -559,12 +559,22 @@ def _how_text(how: object) -> str:
     return f"실행 안 함: {value}"
 
 
+def _one_line(text: object) -> str:
+    """자유 입력을 한 줄로 만든다.
+
+    사유·요청·항목 문구는 검증이 비어 있는지만 보므로 줄바꿈과 '## ...' 가 그대로 들어온다.
+    줄바꿈이 남으면 문구가 줄 시작에 놓여 절 제목을 흉내 낼 수 있다. str.split() 은
+    \\r·\\u2028 같은 줄 구분 문자까지 공백으로 본다. digest 는 원문으로 계산하므로 바뀌지 않는다.
+    """
+    return " ".join(str(text).split())
+
+
 def derive_markdown(ds: DeriveStatus) -> list[str]:
     """Markdown 증빙의 '## 자동 도출' 절. 기존 검사 판정과 별개의 축이다."""
     label = STATUS_LABEL.get(ds.status, ds.status)
-    lines = ["## 자동 도출", "", f"- 자동 도출: {label} — {ds.detail}"]
+    lines = ["## 자동 도출", "", f"- 자동 도출: {label} — {_one_line(ds.detail)}"]
     if ds.request:
-        lines.append(f"- 요청: {ds.request}")
+        lines.append(f"- 요청: {_one_line(ds.request)}")
     if ds.summary:
         parts = [
             f"{LINK_LABEL[k]} {ds.summary[k]}"
@@ -584,17 +594,22 @@ def derive_markdown(ds: DeriveStatus) -> list[str]:
     for key, name in (("existing", "기존 검사 실행"), ("generated", "생성 검사 실행")):
         meta = ds.runs.get(key)
         if meta:
-            lines.append(f"- {name}: {_run_meta_text(meta)}")
+            lines.append(f"- {name}: {_one_line(_run_meta_text(meta))}")
     if ds.status == PERFORMED and ds.items:
         lines.append("")
         lines.append("| ID | 종류 | 확인할 동작 | 이유 | 근거 | 확인 방법 | 실행 증거 |")
         lines.append("|---|---|---|---|---|---|---|")
         for item in ds.items:
-            lines.append(
-                f"| {item.get('id', '')} | {item.get('kind', '')} | {item.get('behavior', '')} "
-                f"| {item.get('why', '')} | {item.get('basis', '') or '—'} "
-                f"| {_how_text(item.get('how'))} | {_link_text(item)} |"
+            cells = (
+                item.get("id", ""),
+                item.get("kind", ""),
+                item.get("behavior", ""),
+                item.get("why", ""),
+                item.get("basis", "") or "—",
+                _how_text(item.get("how")),
+                _link_text(item),
             )
+            lines.append("| " + " | ".join(_one_line(c) for c in cells) + " |")
     lines.append("")
     lines.append(
         "> 이 절은 도출 목록의 접수·형식·시점 확인과 항목별 실행 증거 연결 결과다. 도출이 "
