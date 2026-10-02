@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .derive import NOT_APPLICABLE
 from .hookscan import Fingerprint
 from .runners.base import FAIL, PASS, UNVERIFIED
 
@@ -748,6 +749,9 @@ def build_state(
 class SkipDecision:
     skip: bool
     reason: str
+    # skip 이면서 도출 digest 만 달랐던 경우(해당 없음 → 해당 없음, 사유 문구 변경).
+    # 호출자는 이때 상태와 최신 증빙에 현재 제출을 반영해야 한다.
+    derive_changed: bool = False
 
 
 def can_skip(
@@ -760,6 +764,7 @@ def can_skip(
     session_id: str = "",
     derive_digest: str = "",
     derive_ok: bool = True,
+    derive_status: str = "",
 ) -> SkipDecision:
     """건너뛸 수 있는 상태는 'fresh + PASS' 하나뿐이다.
 
@@ -786,8 +791,15 @@ def can_skip(
     # 같은 코드라도 같은 답을 재사용할 수 없다.
     if not derive_ok:
         return SkipDecision(False, "도출 목록이 무효이거나 시점이 맞지 않음")
+    derive_changed = False
     if state.derive_digest != derive_digest:
-        return SkipDecision(False, "도출 목록 변경")
+        # 이전·현재가 모두 (유효한) 해당 없음이면 사유 문구만 달라진 것이다. 그 digest 차이로
+        # 기존 검사 PASS 를 버리지 않는다. 수행·미제출·무효·stale 은 그대로 재검증한다.
+        # 현재 요청의 제출은 호출자가 증빙에 따로 반영한다(재사용이 곧 도출 상속이 아니다).
+        both_na = state.derive_status == NOT_APPLICABLE and derive_status == NOT_APPLICABLE
+        if not (both_na and state.derive_digest and derive_digest):
+            return SkipDecision(False, "도출 목록 변경")
+        derive_changed = True
     # 같은 세션의 반복 Stop 만 빠르게 지나간다. 새 세션의 첫 Stop 은 며칠
     # 전 PASS 를 믿지 않는다.
     if not session_id or state.verified_session_id != session_id:
@@ -822,7 +834,7 @@ def can_skip(
         return SkipDecision(False, f"증빙이 유효하지 않음 ({check.reason_code})")
     if check.verdict != PASS:
         return SkipDecision(False, f"증빙의 판정={check.verdict}")
-    return SkipDecision(True, "fresh + PASS, 동일 fingerprint")
+    return SkipDecision(True, "fresh + PASS, 동일 fingerprint", derive_changed)
 
 
 # --- 알림 -------------------------------------------------------------------

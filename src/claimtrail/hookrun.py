@@ -13,6 +13,7 @@ shell 은 stdin 을 넘기고 종료 코드를 되돌려 주는 얇은 래퍼로
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -26,6 +27,7 @@ from . import __version__
 from .cli import execute
 from .derive import (
     GENERATED_DIR,
+    NOT_APPLICABLE,
     PERFORMED,
     DeriveStatus,
     cli_invocation,
@@ -51,6 +53,7 @@ from .hookstate import (
     SkipDecision,
     apply_notification,
     archive_run,
+    atomic_write,
     begin_run,
     build_state,
     can_skip,
@@ -118,6 +121,21 @@ def _with_derive(markdown: str, derive_lines: list[str]) -> str:
     if marker in markdown:
         return markdown.replace(marker, block + chr(10) + marker, 1)
     return markdown.rstrip(chr(10)) + chr(10) + chr(10) + block
+
+
+def _replace_derive_block(markdown: str, derive_lines: list[str]) -> str:
+    """최신 증빙의 '## 자동 도출' 절을 교체한다. 절이 없으면 _with_derive 처럼 끼운다.
+
+    복원한 증빙은 이전 요청의 도출 절을 들고 있다. 그 절 끝은 '## 확인한 것' 앞이다.
+    """
+    start = markdown.find("## 자동 도출")
+    if start == -1:
+        return _with_derive(markdown, derive_lines)
+    end = markdown.find("## 확인한 것", start)
+    block = chr(10).join(derive_lines)
+    if end == -1:
+        return markdown[:start] + block
+    return markdown[:start] + block + chr(10) + markdown[end:]
 
 
 @dataclass
@@ -545,7 +563,11 @@ class _Runner:
                 session_id=self.stop.session_id,
                 derive_digest=derive.derive_digest,
                 derive_ok=derive.cache_ok and not pre_notice,
+                derive_status=derive.status,
             )
+            if not decision.skip:
+                # 왜 다시 검증하는지 남긴다. 사유 문구는 고정 문구라 원문 노출이 없다.
+                self.log("nocache", "cache_rejected", decision.reason)
         if decision.skip:
             assert previous is not None
             # 디스크 문제로 복원에 실패한 것은 훅의 고장이 아니다. 예외로 새면
@@ -556,13 +578,28 @@ class _Runner:
                 restored = None
                 self.log("restorefail", "restore_failed", f"{previous.run_id}: {exc}")
             config_now = select_config(root, self.env) if restored is not None else None
-            if config_now is not None and config_now.signature() != config_sel.signature():
+            config_same = (
+                config_now is not None and config_now.signature() == config_sel.signature()
+            )
+            # 복원한 증빙은 이전 요청의 도출 절을 들고 있다. 해당 없음이면 복원할 때마다
+            # 현재 제출로 바꿔 싣는다. digest 가 같은 복원도 포함한다 -- A→B→B 에서
+            # 최신 증빙이 A 로 되돌아가면 안 된다.
+            reuse_published = True
+            if config_same and derive.status == NOT_APPLICABLE:
+                reuse_published = self._reuse_not_applicable(
+                    previous, derive, decision.derive_changed
+                )
+            if config_now is not None and not config_same:
                 # 복원하는 사이 검사 범위 설정이 바뀌었다. 그 PASS 는 다른 범위의 것이다.
                 self.log(
                     "nocache",
                     "config_changed",
                     "캐시 복원 중 검사 범위 설정이 바뀌었다 — 재사용하지 않는다",
                 )
+            elif restored is not None and not reuse_published:
+                # 현재 제출을 증빙에 반영하지 못했다. 로그는 반영 단계가 남겼다.
+                # 반영되지 않은 증빙으로 성공 skip 을 하지 않고 아래에서 다시 검증한다.
+                pass
             elif restored is not None:
                 # 재사용하는 것은 기존 검사의 PASS 증빙이다. 도출 항목을 확인했다는 근거가
                 # 아니다 -- 2a 의 항목은 전부 실행 증거 미연결이다.
@@ -790,6 +827,51 @@ class _Runner:
             published=published,
             run_id=run_id,
         )
+
+    def _reuse_not_applicable(
+        self, previous: HookState, derive: DeriveStatus, derive_changed: bool
+    ) -> bool:
+        """복원한 최신 증빙에 현재 요청의 해당 없음 제출을 싣는다. 반영했으면 True.
+
+        기존 검사 결과는 이전 run 의 것이고 도출 판단만 현재 요청의 것이다 -- 새 검사를 한 것처럼
+        보이지 않게 증빙에 그렇게 적는다. 실행별 보관본(runs/<id>.json·.md)은 건드리지 않는다.
+        순서는 증빙 먼저, 상태는 그다음이다: 상태만 현재 값으로 남는 일이 없어야 한다.
+        어느 쪽이든 실패하면 False 이고, 호출자는 성공 skip 대신 다시 검증한다.
+        """
+        assert self.state_dir is not None
+        latest = run_paths(self.state_dir, previous.run_id)["latest_md"]
+        lines = derive_markdown(derive)
+        lines.insert(
+            3,  # '## 자동 도출', 빈 줄, '- 자동 도출: …' 다음
+            f"- 기존 검사 결과: 이전 run `{previous.run_id}` 재사용(이번 Stop 에서 검사를 새로 "
+            "실행하지 않았다) / 도출 판단: 현재 요청 기준",
+        )
+        try:
+            body = latest.read_bytes().decode("utf-8")
+            atomic_write(latest, _replace_derive_block(body, lines).encode("utf-8"))
+            if derive_changed:
+                save_state(
+                    self.state_dir,
+                    replace(
+                        previous,
+                        derive_digest=derive.derive_digest,
+                        derive_status=derive.status,
+                    ),
+                )
+        except (OSError, ValueError) as exc:
+            self.log("derive_reuse", "publish_failed", f"{previous.run_id}: {exc}")
+            # 최신 증빙을 이전 run 의 것으로 되돌린다. 안 되면 재검증이 덮어쓴다.
+            with contextlib.suppress(OSError):
+                restore_latest(self.state_dir, previous.run_id)
+            return False
+        if derive_changed:
+            self.log(
+                "derive_reuse",
+                "relaxed",
+                f"{previous.derive_digest[:12]}->{derive.derive_digest[:12]} "
+                f"(해당 없음 사유만 변경, 기존 검사 run {previous.run_id[:8]} 재사용)",
+            )
+        return True
 
     def _restored_derive(self, run_id: str) -> DeriveStatus | None:
         """복원한 실행 증빙(JSON)의 도출 절을 되돌림 판단용으로 다시 읽는다. 없으면 None."""
